@@ -7,4 +7,6 @@ services:
       - /path/to/existing/huggingface/hub:/hf-cache/hub
       # Make models trained elsewhere pickable, read-only.
       - /path/to/other/models:/models/other:ro
+      # Make dataset files from elsewhere pickable, read-only.
+      - /path/to/other/datasets:/datasets/other:ro
   app: *extra

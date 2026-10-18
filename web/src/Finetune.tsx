@@ -19,6 +19,7 @@ export function Finetune({ onLogout }: { onLogout: () => void }) {
   const [gpus, setGpus] = useState<GpuList | null>(null);
   const [gpuError, setGpuError] = useState<string | null>(null);
   const [report, setReport] = useState<Report | null>(null);
+  const [dataReady, setDataReady] = useState(false);
   const [outcome, setOutcome] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => saveForm(form), [form]);
@@ -59,9 +60,13 @@ export function Finetune({ onLogout }: { onLogout: () => void }) {
           ? "Pick a base model first."
           : report.verdict === "bad"
             ? "That base model can't be trained as it is. Pick another one."
-            : Object.keys(errors).length
-              ? "Fix the fields marked in red first."
-              : null;
+            : !form.data.train
+              ? "Choose a train dataset first."
+              : Object.keys(errors).length
+                ? "Fix the fields marked in red first."
+                : !dataReady
+                  ? "Prepare the data first (the button in the Data section)."
+                  : null;
     setOutcome(problem ? { ok: false, text: problem } : { ok: true, text: "Everything checks out. Training arrives in step 3." });
   }
 
@@ -91,7 +96,7 @@ export function Finetune({ onLogout }: { onLogout: () => void }) {
       <TrainAs {...props} />
       <ModelSection {...props} onReport={setReport} />
       <GpuSection {...props} list={gpus} error={gpuError} />
-      <DataSection {...props} />
+      <DataSection {...props} onReady={setDataReady} />
       <HyperSection {...props} />
       <CheckpointSection {...props} />
 

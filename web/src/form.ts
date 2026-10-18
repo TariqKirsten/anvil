@@ -1,6 +1,8 @@
 // Everything the fine-tuning screen asks for, its defaults, and the checks it must pass before a run can start.
 // The form is kept in this browser's localStorage, so a reload doesn't lose it.
 
+import type { DataSource } from "./types";
+
 export type TrainAs = "lm" | "decision";
 
 export interface FormState {
@@ -13,6 +15,9 @@ export interface FormState {
   // null until you pick: then every card that isn't busy is used.
   gpus: number[] | null;
   data: {
+    train: DataSource | null;
+    validation: DataSource | null;
+    test: DataSource | null;
     dedupe: boolean;
     nearCopies: boolean;
     valPercent: number;
@@ -64,7 +69,16 @@ export const DEFAULTS: FormState = {
   trainingType: "lora",
   model: { source: "hub", repo: null, folder: "" },
   gpus: null,
-  data: { dedupe: true, nearCopies: true, valPercent: 5, testPercent: 5, keepTogether: "input" },
+  data: {
+    train: null,
+    validation: null,
+    test: null,
+    dedupe: true,
+    nearCopies: true,
+    valPercent: 5,
+    testPercent: 5,
+    keepTogether: "input",
+  },
   hyper: {
     learningRate: "2e-4",
     epochs: 1,
@@ -109,6 +123,26 @@ export function saveForm(form: FormState) {
   } catch {
     // Private windows and blocked storage: the form just isn't remembered.
   }
+}
+
+// What the server needs to prepare the data (see server/anvil/datasets.py). The same request always gives the same
+// result, so it doubles as the key for "is the prepared data still current?".
+export function prepareRequest(form: FormState) {
+  const d = form.data;
+  if (!d.train) return null;
+  const source = (s: DataSource | null) =>
+    s && (s.kind === "file" ? { kind: s.kind, path: s.path } : { kind: s.kind, repo: s.repo, config: s.config, split: s.split });
+  return {
+    train: source(d.train),
+    validation: source(d.validation),
+    test: source(d.test),
+    dedupe: d.dedupe,
+    near_copies: d.nearCopies,
+    val_percent: d.valPercent,
+    test_percent: d.testPercent,
+    keep_together: d.keepTogether,
+    seed: form.hyper.seed,
+  };
 }
 
 export type Errors = Partial<Record<string, string>>;

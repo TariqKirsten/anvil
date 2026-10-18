@@ -69,5 +69,65 @@ export interface FolderList {
   path: string | null;
   parent: string | null;
   dirs: string[];
+  files?: { name: string; size: number }[];
   roots: string[];
+}
+
+// ---- datasets
+
+export type Slot = "train" | "validation" | "test";
+
+export type DataSource =
+  | { kind: "file"; path: string; name: string }
+  | { kind: "hub"; repo: string; config: string | null; split: string; name: string };
+
+export type DataFormat = "decision" | "chat" | "pairs" | "text";
+
+export interface Problem {
+  row: number;
+  reason: string;
+}
+
+export interface DatasetInfo {
+  rows: number;
+  columns: string[];
+  format: DataFormat | null;
+  format_label: string | null;
+  preview: Record<string, string>[];
+  checked: number;
+  invalid: number | null;
+  examples: Problem[];
+}
+
+export interface PrepareReport {
+  format: DataFormat;
+  format_label: string;
+  rows: Record<Slot, number>;
+  invalid: Partial<Record<Slot, number>>;
+  examples: Partial<Record<Slot, Problem[]>>;
+  removed: Partial<Record<Slot, { exact: number; near: number; conflicts: number }>>;
+  leaks: Partial<Record<Slot, number>>;
+  given: { validation: boolean; test: boolean };
+  notes: string[];
+  seconds: number;
+}
+
+export interface PrepareJob {
+  id: string;
+  fingerprint: string;
+  state: "running" | "done" | "failed";
+  stage: string;
+  progress: number;
+  report: PrepareReport | null;
+  error: string | null;
+}
+
+export interface HubDataset {
+  id: string;
+  downloads: number;
+  licence: string | null;
+  permissive: boolean;
+  gated: boolean;
+  private: boolean;
+  size: string | null;
 }

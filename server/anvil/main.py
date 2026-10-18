@@ -14,7 +14,7 @@ from fastapi.requests import Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from . import accounts, auth, config, folders, gpus, models_check
+from . import accounts, auth, config, datasets, folders, gpus, models_check
 
 REPO_ID = re.compile(r"^[\w.-]+/[\w.-]+$")
 
@@ -22,6 +22,8 @@ REPO_ID = re.compile(r"^[\w.-]+/[\w.-]+$")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     accounts.ensure_default_user()
+    config.settings.uploads.mkdir(parents=True, exist_ok=True)
+    config.settings.prepared.mkdir(parents=True, exist_ok=True)
     # The first PyTorch probe takes a few seconds, so start it now instead of on the first page load.
     threading.Thread(target=gpus.probe, daemon=True).start()
     yield
@@ -168,6 +170,137 @@ def check_folder(body: FolderCheck) -> dict:
     if not path.is_dir():
         raise HTTPException(404, f"{body.path} isn't a folder.")
     return models_check.check_folder(path).to_dict()
+
+
+# ---------------------------------------------------------------- datasets
+
+def _hub_failure(exc: Exception) -> HTTPException:
+    from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+
+    if isinstance(exc, GatedRepoError):
+        return HTTPException(403, "This dataset is gated. Accept its terms on its Hub page, then add your Hugging "
+                                  "Face token in Settings.")
+    if isinstance(exc, RepositoryNotFoundError):
+        return HTTPException(404, "There's no such dataset on the Hub, or it's private and your token can't see it.")
+    return HTTPException(502, f"Couldn't reach Hugging Face: {exc}")
+
+
+def _data_failure(exc: Exception) -> HTTPException:
+    if isinstance(exc, PermissionError):
+        return HTTPException(403, str(exc))
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(404, str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(400, str(exc))
+    return _hub_failure(exc)
+
+
+@app.get("/api/datasets/browse")
+def browse_datasets(path: str | None = None) -> dict:
+    try:
+        return folders.list_dirs(path, config.settings.all_dataset_roots, datasets.EXTENSIONS)
+    except (PermissionError, FileNotFoundError) as exc:
+        raise _data_failure(exc) from exc
+
+
+UPLOAD_NAME = re.compile(r"[^\w.-]+")
+
+
+@app.put("/api/datasets/upload")
+async def upload_dataset(request: Request, name: str) -> dict:
+    """The file arrives as the request body, written to disk as it streams in."""
+    clean = UPLOAD_NAME.sub("_", name.rsplit("/", 1)[-1]).strip("._") or "dataset"
+    stem, dot, suffix = clean.rpartition(".")
+    if not dot or f".{suffix.lower()}" not in datasets.EXTENSIONS:
+        raise HTTPException(400, "Upload a .parquet, .jsonl, .json or .csv file.")
+    folder = config.settings.uploads
+    folder.mkdir(parents=True, exist_ok=True)
+    target, n = folder / clean, 1
+    while target.exists():
+        target, n = folder / f"{stem}-{n}.{suffix}", n + 1
+    partial = target.with_name(target.name + ".part")
+    try:
+        with partial.open("wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+        partial.rename(target)
+    finally:
+        partial.unlink(missing_ok=True)
+    return {"path": str(target), "name": target.name, "size": target.stat().st_size}
+
+
+class InspectBody(BaseModel):
+    source: dict
+
+
+@app.post("/api/datasets/inspect")
+def inspect_dataset(body: InspectBody, request: Request) -> dict:
+    try:
+        return datasets.inspect(body.source, hf_token(request))
+    except Exception as exc:
+        raise _data_failure(exc) from exc
+
+
+class PrepareBody(BaseModel):
+    train: dict
+    validation: dict | None = None
+    test: dict | None = None
+    dedupe: bool = True
+    near_copies: bool = True
+    val_percent: float = 5
+    test_percent: float = 5
+    keep_together: str = "input"
+    seed: int = 3407
+
+
+@app.post("/api/datasets/prepare")
+def prepare_dataset(body: PrepareBody, request: Request, run: bool = True) -> dict:
+    """Start preparing (or find the earlier result). With run=false it only looks for an earlier result."""
+    if not (0 <= body.val_percent <= 40 and 0 <= body.test_percent <= 40):
+        raise HTTPException(400, "Use 0 to 40% for the validation and test splits.")
+    if body.keep_together not in ("input", "source", "nothing"):
+        raise HTTPException(400, "Keep rows together by input, source or nothing.")
+    try:
+        job = datasets.start(body.model_dump(), hf_token(request), run=run)
+    except Exception as exc:
+        raise _data_failure(exc) from exc
+    return {"job": job.public() if job else None}
+
+
+@app.get("/api/datasets/jobs/{job_id}")
+def dataset_job(job_id: str) -> dict:
+    job = datasets.job(job_id)
+    if job is None:
+        raise HTTPException(404, "That job is gone. anvil may have restarted; prepare the data again.")
+    return {"job": job.public()}
+
+
+@app.get("/api/hub/datasets/search")
+def hub_dataset_search(request: Request, q: str = "") -> dict:
+    try:
+        return {"datasets": datasets.search_hub(q.strip(), hf_token(request))}
+    except Exception as exc:
+        raise _hub_failure(exc) from exc
+
+
+@app.get("/api/hub/datasets/configs")
+def hub_dataset_configs(request: Request, repo: str) -> dict:
+    if not REPO_ID.match(repo):
+        raise HTTPException(400, "A dataset id looks like org/name.")
+    try:
+        return {"configs": datasets.hub_configs(repo, hf_token(request))}
+    except Exception as exc:
+        raise _hub_failure(exc) from exc
+
+
+@app.get("/api/hub/datasets/splits")
+def hub_dataset_splits(request: Request, repo: str, config: str | None = None) -> dict:
+    if not REPO_ID.match(repo):
+        raise HTTPException(400, "A dataset id looks like org/name.")
+    try:
+        return {"splits": datasets.hub_splits(repo, config, hf_token(request))}
+    except Exception as exc:
+        raise _hub_failure(exc) from exc
 
 
 @app.get("/api/{rest:path}")

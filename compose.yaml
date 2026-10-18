@@ -6,6 +6,7 @@
 #   /data       anvil's own data: accounts, runs, uploaded datasets          (ANVIL_DATA)
 #   /hf-cache   the Hugging Face cache: downloaded models and datasets       (ANVIL_HF_CACHE)
 #   /models     local models you want to pick from                          (ANVIL_MODELS)
+#   /datasets   dataset files you want to pick from                         (ANVIL_DATASETS)
 # The folders must exist before the first start. Docker would otherwise create them owned by root.
 # Machine-specific extra folders go in compose.override.yaml (see compose.override.example.yaml).
 
@@ -25,6 +26,7 @@ x-anvil: &anvil
   environment:
     ANVIL_DATA: /data
     ANVIL_MODEL_ROOTS: /models:/hf-cache/hub
+    ANVIL_DATASET_ROOTS: /datasets
     HF_HOME: /hf-cache
     HF_HUB_CACHE: /hf-cache/hub
     HOME: /data/home
@@ -43,6 +45,10 @@ x-anvil: &anvil
     - type: bind
       source: ${ANVIL_MODELS:?Set ANVIL_MODELS in .env}
       target: /models
+      bind: { create_host_path: false }
+    - type: bind
+      source: ${ANVIL_DATASETS:?Set ANVIL_DATASETS in .env}
+      target: /datasets
       bind: { create_host_path: false }
   working_dir: /workspace
   init: true
