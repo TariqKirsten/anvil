@@ -102,11 +102,12 @@ def busy_gpus() -> dict[int, str]:
 
 # ---------------------------------------------------------------- starting
 
-def _choose_gpus(picked: list[int] | None) -> tuple[list[int], int | None]:
+def _choose_gpus(picked: list[int] | None, spare_checks: bool = True) -> tuple[list[int], int | None]:
     """The cards to train on, and a spare card for the judge (None: the training cards do the checks themselves).
 
     Every picked card that's free trains. The first one is process 0, which also saves checkpoints and finishes the run,
-    so it's a card that doesn't drive a screen if there is one. The judge gets a free card you didn't pick."""
+    so it's a card that doesn't drive a screen if there is one. The judge gets a free card you didn't pick, unless
+    spare_checks is off (to keep that card free for another run)."""
     found = gpus.list_gpus()["gpus"]
     if not found:
         raise ValueError("There's no GPU to train on.")
@@ -120,7 +121,7 @@ def _choose_gpus(picked: list[int] | None) -> tuple[list[int], int | None]:
     candidates.sort(key=lambda g: (g["display"], g["index"]))
     train = [g["index"] for g in candidates]
     spare = [g["index"] for g in found if g["index"] not in train and g["index"] not in busy and not g["busy"]]
-    return train, min(spare) if spare else None
+    return train, min(spare) if spare and spare_checks else None
 
 
 def _model(form: dict, token: str | None) -> dict:
@@ -177,7 +178,7 @@ def create(form: dict, prepare: dict, token: str | None) -> str:
     if train_as == "lm":
         method = fmt  # for language models the data decides: chat, prompt and completion, or plain text
 
-    train_gpus, judge_gpu = _choose_gpus(form.get("gpus"))
+    train_gpus, judge_gpu = _choose_gpus(form.get("gpus"), form.get("spareChecks", True) is not False)
     run_id = _new_id(form.get("name") or "run")
     path = runs_dir() / run_id
     path.mkdir(parents=True)

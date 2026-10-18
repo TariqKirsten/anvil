@@ -244,6 +244,13 @@ def test_a_free_card_you_didnt_pick_judges(run_settings):
     assert run_settings == [(run_id, [1], 0)]
 
 
+def test_checks_can_stay_on_the_training_card_to_keep_the_spare_free(run_settings):
+    run_id = runs.create({**FORM, "gpus": [1], "spareChecks": False}, {"train": {}}, None)
+    assert run_settings == [(run_id, [1], None)]
+    other = runs.create({**FORM, "gpus": [0], "spareChecks": False}, {"train": {}}, None)  # the other card is free
+    assert run_settings[-1] == (other, [0], None)
+
+
 def test_a_busy_card_neither_trains_unpicked_nor_judges(run_settings, monkeypatch):
     monkeypatch.setattr(runs.gpus, "list_gpus", lambda: {"gpus": [
         {"index": 0, "display": True, "busy": True}, {"index": 1, "display": False, "busy": False}]})

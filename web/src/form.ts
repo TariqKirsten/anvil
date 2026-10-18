@@ -14,6 +14,8 @@ export interface FormState {
   model: { source: "hub" | "folder"; repo: string | null; folder: string };
   // null until you pick: then every card that isn't busy is used.
   gpus: number[] | null;
+  // A free card you didn't tick checks the checkpoints. Off: the training cards do, and that card stays free.
+  spareChecks: boolean;
   data: {
     train: DataSource | null;
     validation: DataSource | null;
@@ -63,6 +65,19 @@ export const PICK_BY: Record<TrainAs, { value: string; label: string }[]> = {
   lm: [{ value: "val_loss", label: "Validation loss" }],
 };
 
+// The model's learning rate that suits each way of training. Clef from a plain model learned nothing at letters'
+// 2e-4 (the model's features moved faster than the new head could follow); 5e-5 worked.
+export function defaultLearningRate(form: Pick<FormState, "trainAs" | "decisionMethod">) {
+  return form.trainAs === "decision" && form.decisionMethod === "clef" ? "5e-5" : "2e-4";
+}
+
+// Switching the way of training moves the learning rate to the new default, unless you've set your own.
+export function withMethod(form: FormState, change: Partial<Pick<FormState, "trainAs" | "decisionMethod">>): FormState {
+  const next = { ...form, ...change };
+  const untouched = form.hyper.learningRate.trim() === defaultLearningRate(form);
+  return untouched ? { ...next, hyper: { ...next.hyper, learningRate: defaultLearningRate(next) } } : next;
+}
+
 export const DEFAULTS: FormState = {
   name: "new-run",
   trainAs: "decision",
@@ -71,6 +86,7 @@ export const DEFAULTS: FormState = {
   trainingType: "lora",
   model: { source: "hub", repo: null, folder: "" },
   gpus: null,
+  spareChecks: true,
   data: {
     train: null,
     validation: null,

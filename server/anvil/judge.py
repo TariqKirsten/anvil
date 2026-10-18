@@ -74,6 +74,9 @@ def run(cfg: dict, run_dir: Path, report: train.Reporter) -> None:
 
 
 def main() -> None:
+    import faulthandler
+
+    faulthandler.enable(all_threads=True)  # a crash in native code still prints where every thread was
     run_dir = Path(sys.argv[1])
     cfg = json.loads((run_dir / "config.json").read_text())
     (run_dir / "judge").mkdir(exist_ok=True)

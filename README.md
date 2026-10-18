@@ -77,7 +77,9 @@ every validation check, the final test, the checkpoints and the log.
   - **Clef head**: Cloudflare's design. A row's state and all its questions are one prompt, and a small new network
     (the head, about 30M parameters on a 2B model) reads the model's hidden states at each question and option and
     scores every option: one pass per row. A new head trains alone for the first 10% of the steps, at its own learning
-    rate (Head learning rate, default 1e-4), then the model joins in. A Clef release as the base model brings its
+    rate (Head learning rate, default 1e-4), then the model joins in. Picking Clef sets the model's learning rate to
+    5e-5: from a plain model at letters' 2e-4, Clef learned nothing (the model's features moved faster than the new head
+    could follow), while 5e-5 learned faster than letters. A Clef release as the base model brings its
     trained head along. The head is saved as Clef releases ship it (`joint_head_config.json`,
     `joint_head.safetensors`), so Cloudflare's own code loads the result. The prompt holds every question, so give it
     room in Max length.
@@ -99,7 +101,8 @@ every validation check, the final test, the checkpoints and the log.
 - Process 0 runs on a card that doesn't drive a screen if there is one. It writes the run's files, saves checkpoints
   and finishes the run; Stop reaches it, and the cards agree every step on whether to stop.
 - A free GPU you didn't tick becomes the judge (below). Without one, the training cards pause at each checkpoint and
-  check it together, each scoring its share of the validation rows.
+  check it together, each scoring its share of the validation rows. Untick "Use GPU N for checks" to keep that card
+  free, for another run say: two experiments side by side, one per card.
 - Resume needs the same cards, because the batches are split by how many there are.
 - A card that drives your screen can train too, but the desktop may stutter. Close video calls and games on it until
   the run ends: on an R9700 a two-card run once hung the screen card during a video call (it needed a reboot); with

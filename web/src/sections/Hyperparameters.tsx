@@ -39,7 +39,10 @@ export function HyperSection({ form, update, errors, cards, trainItems }: Sectio
   return (
     <Section title="Hyperparameters">
       <div className="grid-4">
-        <Field id="learningRate" label="Learning rate" error={errors.learningRate}>
+        <Field id="learningRate" label="Learning rate" error={errors.learningRate}
+          hint={!clef ? undefined : Number(h.learningRate) > 1e-4
+            ? "High for Clef: 5e-5 works, 2e-4 stopped it learning"
+            : "for the model; the head has its own below"}>
           <input id="learningRate" value={h.learningRate} aria-invalid={errors.learningRate ? true : undefined}
             onChange={(e) => setH({ learningRate: e.target.value })} />
         </Field>

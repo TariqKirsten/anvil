@@ -630,6 +630,9 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
 
 
 def main() -> None:
+    import faulthandler
+
+    faulthandler.enable(all_threads=True)  # a crash in native code still prints where every thread was
     from . import parallel
 
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])

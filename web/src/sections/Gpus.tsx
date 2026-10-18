@@ -20,8 +20,8 @@ function plan(gpus: Gpu[], picked: Set<number>) {
   const trains = gpus
     .filter((g) => picked.has(g.index))
     .sort((a, b) => Number(a.display) - Number(b.display) || a.index - b.index);
-  const checks = gpus.filter((g) => !picked.has(g.index) && !g.busy).sort((a, b) => a.index - b.index)[0];
-  return { trains, checks };
+  const spare = gpus.filter((g) => !picked.has(g.index) && !g.busy).sort((a, b) => a.index - b.index)[0];
+  return { trains, spare };
 }
 
 // "GPU 1", "GPUs 1 and 0", "GPUs 1, 2 and 0"
@@ -30,8 +30,9 @@ function names(cards: Gpu[]) {
   return ids.length === 1 ? `GPU ${ids[0]}` : `GPUs ${ids.slice(0, -1).join(", ")} and ${ids[ids.length - 1]}`;
 }
 
-function note(gpus: Gpu[], picked: Set<number>) {
-  const { trains, checks } = plan(gpus, picked);
+function note(gpus: Gpu[], picked: Set<number>, spareChecks: boolean) {
+  const { trains, spare } = plan(gpus, picked);
+  const checks = spareChecks ? spare : undefined;
   if (!trains.length) return { main: "Pick at least one card.", bad: true, warnings: [] as string[], info: [] as string[] };
   const together = trains.length > 1;
   const main =
@@ -48,8 +49,8 @@ function note(gpus: Gpu[], picked: Set<number>) {
   if (sizes.length > 1)
     warnings.push(`The cards differ in memory: the batch has to fit on the ${Math.min(...sizes)} GB card, and the slowest card sets the pace.`);
   const info: string[] = [];
-  if (checks && together) info.push(`GPU ${checks.index} isn't ticked but it's free, so it does the checks.`);
-  else if (checks) info.push(`GPU ${checks.index} isn't ticked but it's free, so it does the checks. Tick it to train on it too.`);
+  if (checks) info.push(`GPU ${checks.index} isn't ticked but it's free, so it does the checks.${together ? "" : " Tick it to train on it too."}`);
+  else if (spare) info.push(`GPU ${spare.index} stays free, for another run say.`);
   else if (together) info.push("To check without pausing, untick a card: a free card you didn't tick does the checks.");
   for (const g of trains.filter((g) => g.display))
     info.push(`GPU ${g.index} also drives your screen, so the desktop may stutter while it trains. Close video calls and games on it until the run ends.`);
@@ -66,7 +67,8 @@ export function GpuSection({ form, update, list, error }: SectionProps & { list:
     else next.add(index);
     update((f) => ({ ...f, gpus: [...next].sort((a, b) => a - b) }));
   };
-  const n = note(gpus, picked);
+  const n = note(gpus, picked, form.spareChecks);
+  const { spare } = plan(gpus, picked);
 
   return (
     <Section title="GPUs">
@@ -110,6 +112,13 @@ export function GpuSection({ form, update, list, error }: SectionProps & { list:
           </div>
           <div className="gpu-note">
             <p className={n.bad ? "field-error" : undefined}>{n.main}</p>
+            {spare && !n.bad && (
+              <label className="spare-checks">
+                <input type="checkbox" checked={form.spareChecks}
+                  onChange={(e) => update((f) => ({ ...f, spareChecks: e.target.checked }))} />
+                Use GPU {spare.index} for checks
+              </label>
+            )}
             {n.warnings.map((w) => (
               <p key={w} className="warn-text">
                 {w}

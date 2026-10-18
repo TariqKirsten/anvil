@@ -1455,3 +1455,12 @@ h1 {
 .ckpt-score {
   color: var(--text-2);
 }
+
+.spare-checks {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 6px;
+  font-size: 13px;
+  cursor: pointer;
+}

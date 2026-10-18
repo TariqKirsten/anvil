@@ -1,4 +1,4 @@
-import { PICK_BY, type FormState, type SectionProps } from "../form";
+import { PICK_BY, withMethod, type FormState, type SectionProps } from "../form";
 import { Field, Section, Segmented } from "../ui";
 
 const METHOD_HINTS = {
@@ -20,7 +20,7 @@ export function TrainAs({ form, update }: SectionProps) {
           { value: "decision", label: "Decision model" },
         ]}
         onChange={(trainAs) =>
-          update((f) => ({ ...f, trainAs, checkpoints: { ...f.checkpoints, pickBy: PICK_BY[trainAs][0].value } }))
+          update((f) => ({ ...withMethod(f, { trainAs }), checkpoints: { ...f.checkpoints, pickBy: PICK_BY[trainAs][0].value } }))
         }
       />
       <div className="row">
@@ -34,7 +34,7 @@ export function TrainAs({ form, update }: SectionProps) {
                 { value: "clef", label: "Clef head" },
                 { value: "letters", label: "Letters" },
               ]}
-              onChange={(decisionMethod) => update((f) => ({ ...f, decisionMethod }))}
+              onChange={(decisionMethod) => update((f) => withMethod(f, { decisionMethod }))}
             />
           ) : (
             <Segmented
