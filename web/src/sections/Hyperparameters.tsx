@@ -5,9 +5,27 @@ import { Field, NumberInput, Section } from "../ui";
 
 type Hyper = FormState["hyper"];
 
-export function HyperSection({ form, update, errors }: SectionProps) {
+// What one step and one epoch mean for these settings: each card takes a batch, so a step learns from
+// batch size × cards × gradient accumulation rows, and an epoch is one pass over all of train.
+function percent(part: number, whole: number) {
+  const p = (100 * part) / whole;
+  return `${p < 1 ? p.toFixed(1) : Math.round(p)}%`;
+}
+
+export function HyperSection({ form, update, errors, cards, trainItems }: SectionProps & {
+  cards: number;
+  trainItems: number | null;
+}) {
   const [advanced, setAdvanced] = useState(false);
   const h = form.hyper;
+  const perStep = h.batchSize * cards * h.gradAccum;
+  const stepsPerEpoch = trainItems && perStep > 0 ? Math.ceil(trainItems / perStep) : null;
+  const epochHint = stepsPerEpoch
+    ? h.epochs === 1
+      ? `1 epoch = ${stepsPerEpoch.toLocaleString()} steps`
+      : `${h.epochs} epochs = ${(stepsPerEpoch * h.epochs).toLocaleString()} steps`
+    : "passes over the training data";
+  const cut = h.maxSteps && stepsPerEpoch ? `${percent(h.maxSteps, stepsPerEpoch)} of an epoch` : null;
   const lora = form.trainingType !== "full";
   const setH = (change: Partial<Hyper>) => update((f) => ({ ...f, hyper: { ...f.hyper, ...change } }));
   const num = (key: keyof Hyper, label: string, step = 1, hint?: string) => (
@@ -24,8 +42,9 @@ export function HyperSection({ form, update, errors }: SectionProps) {
           <input id="learningRate" value={h.learningRate} aria-invalid={errors.learningRate ? true : undefined}
             onChange={(e) => setH({ learningRate: e.target.value })} />
         </Field>
-        {num("epochs", "Epochs")}
-        {num("batchSize", "Batch size")}
+        {num("epochs", "Epochs", 1, epochHint)}
+        {num("batchSize", cards > 1 ? "Batch size (per card)" : "Batch size", 1,
+          `${perStep.toLocaleString()} rows per step${cards > 1 ? ` on ${cards} cards` : ""}`)}
         {lora && num("loraRank", "LoRA rank")}
       </div>
       <button type="button" className="link toggle" aria-expanded={advanced} onClick={() => setAdvanced((a) => !a)}>
@@ -61,12 +80,12 @@ export function HyperSection({ form, update, errors }: SectionProps) {
             </select>
           </Field>
           {lora && num("loraAlpha", "LoRA alpha", 1, "usually 2 × rank")}
-          {num("maxSteps", "Max steps", 1, "0 = all epochs; set it for quick test runs")}
+          {num("maxSteps", "Max steps", 1, cut ? `${cut}; 0 = all epochs` : "0 = all epochs; set it for quick test runs")}
         </div>
       ) : (
         <p className="hint">
           Warmup {h.warmupPercent}% · {h.scheduler} · weight decay {h.weightDecay} · max length {h.maxLength} ·{" "}
-          {h.precision} · seed {h.seed}{h.maxSteps ? ` · stops after ${h.maxSteps} steps` : ""}
+          {h.precision} · seed {h.seed}{h.maxSteps ? ` · stops after ${h.maxSteps} steps${cut ? ` (${cut})` : ""}` : ""}
         </p>
       )}
     </Section>

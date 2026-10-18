@@ -24,7 +24,9 @@ function message(e: unknown) {
 
 type Look = DatasetInfo | { error: string } | "loading";
 
-export function DataSection({ form, update, errors, onReady }: SectionProps & { onReady: (ready: boolean) => void }) {
+export function DataSection({ form, update, errors, onReady }: SectionProps & {
+  onReady: (ready: boolean, report: PrepareReport | null) => void;
+}) {
   const d = form.data;
   const decision = form.trainAs === "decision";
   const [picking, setPicking] = useState<Slot | null>(null);
@@ -215,7 +217,11 @@ function Preview({ info }: { info: DatasetInfo }) {
   );
 }
 
-function Prepare({ form, invalid, onReady }: { form: FormState; invalid: boolean; onReady: (ready: boolean) => void }) {
+function Prepare({ form, invalid, onReady }: {
+  form: FormState;
+  invalid: boolean;
+  onReady: (ready: boolean, report: PrepareReport | null) => void;
+}) {
   const request = prepareRequest(form);
   const key = request && !invalid ? JSON.stringify(request) : null;
   const [job, setJob] = useState<{ key: string; job: PrepareJob } | null>(null);
@@ -253,7 +259,8 @@ function Prepare({ form, invalid, onReady }: { form: FormState; invalid: boolean
 
   const current = job && job.key === key ? job.job : null;
   const ready = current?.state === "done";
-  useEffect(() => onReady(ready), [ready, onReady]);
+  const report = ready ? current.report : null;
+  useEffect(() => onReady(ready, report), [ready, report, onReady]);
 
   function start() {
     if (!key) return;

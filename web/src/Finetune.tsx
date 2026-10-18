@@ -1,7 +1,7 @@
 // The fine-tuning screen: every section, the header, and the Start button that checks the whole form.
 
 import { IconPlayerPlay } from "@tabler/icons-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import { loadForm, prepareRequest, saveForm, validate, type FormState } from "./form";
 import { CheckpointSection } from "./sections/Checkpoints";
@@ -11,7 +11,7 @@ import { HyperSection } from "./sections/Hyperparameters";
 import { ModelSection } from "./sections/Model";
 import { TrainAs } from "./sections/TrainAs";
 import { Topbar } from "./Topbar";
-import type { GpuList, Report } from "./types";
+import type { GpuList, PrepareReport, Report } from "./types";
 import { Badge } from "./ui";
 
 export function Finetune({ onLogout }: { onLogout: () => void }) {
@@ -20,6 +20,11 @@ export function Finetune({ onLogout }: { onLogout: () => void }) {
   const [gpuError, setGpuError] = useState<string | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [dataReady, setDataReady] = useState(false);
+  const [prepared, setPrepared] = useState<PrepareReport | null>(null);
+  const onDataReady = useCallback((ready: boolean, report: PrepareReport | null) => {
+    setDataReady(ready);
+    setPrepared(report);
+  }, []);
   const [starting, setStarting] = useState(false);
   const [outcome, setOutcome] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -109,8 +114,9 @@ export function Finetune({ onLogout }: { onLogout: () => void }) {
       <TrainAs {...props} />
       <ModelSection {...props} onReport={setReport} />
       <GpuSection {...props} list={gpus} error={gpuError} />
-      <DataSection {...props} onReady={setDataReady} />
-      <HyperSection {...props} />
+      <DataSection {...props} onReady={onDataReady} />
+      <HyperSection {...props} cards={Math.max(1, pickedGpus(form, gpus).length)}
+        trainItems={prepared ? (prepared.items?.train ?? prepared.rows.train) : null} />
       <CheckpointSection {...props} />
 
       <footer className="footer">

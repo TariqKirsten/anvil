@@ -83,16 +83,17 @@ def run_config(model: Path, data: Path, train_as="decision", fmt="decision", eve
             "checkpoints": {"every": every, "keepBest": 3, "patience": 3, "pickBy": "auroc"}, "created": time.time()}
 
 
-def start(run_dir: Path, resume=False) -> subprocess.Popen:
+def start(run_dir: Path, resume=False, cards=1) -> subprocess.Popen:
+    """The trainer, as the server starts it; several "cards" are several CPU processes (gloo instead of RCCL)."""
     env = {**os.environ, "ANVIL_DEVICE": "cpu", "HIP_VISIBLE_DEVICES": "", "CUDA_VISIBLE_DEVICES": "",
-           "PYTHONPATH": str(SERVER)}
+           "PYTHONPATH": str(SERVER), "OMP_NUM_THREADS": "2"}
     log = (run_dir / "log.txt").open("ab")
-    return subprocess.Popen([sys.executable, "-m", "anvil.train", str(run_dir)] + (["--resume"] if resume else []),
+    return subprocess.Popen(runs.command("anvil.train", run_dir, cards, ["--resume"] if resume else []),
                             env=env, stdout=log, stderr=subprocess.STDOUT)
 
 
-def make_run(tmp: Path, cfg: dict) -> Path:
-    run_dir = tmp / "run"
+def make_run(tmp: Path, cfg: dict, name: str = "run") -> Path:
+    run_dir = tmp / name
     run_dir.mkdir()
     (run_dir / "config.json").write_text(json.dumps(cfg))
     return run_dir
@@ -218,8 +219,8 @@ def run_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(runs.gpus, "list_gpus", lambda: {"gpus": [
         {"index": 0, "display": True, "busy": False}, {"index": 1, "display": False, "busy": False}]})
     spawned = []
-    monkeypatch.setattr(runs, "_spawn", lambda run_id, path, gpu, token, resume, judge_gpu=None:
-                        spawned.append((run_id, gpu, judge_gpu)))
+    monkeypatch.setattr(runs, "_spawn", lambda run_id, path, gpus, token, resume, judge_gpu=None:
+                        spawned.append((run_id, gpus, judge_gpu)))
 
     class Done:
         state, fingerprint = "done", "abc"
@@ -229,22 +230,46 @@ def run_settings(tmp_path, monkeypatch):
     return spawned
 
 
-def test_a_run_trains_on_the_card_without_a_screen_and_judges_on_the_other(run_settings):
-    run_id = runs.create(FORM, {"train": {}}, None)
-    assert run_id.startswith("my-run-") and run_settings == [(run_id, 1, 0)]
+def test_every_picked_card_trains_led_by_the_one_without_a_screen(run_settings):
+    run_id = runs.create(FORM, {"train": {}}, None)  # no pick: every free card
+    assert run_id.startswith("my-run-") and run_settings == [(run_id, [1, 0], None)]
     cfg = json.loads((config.settings.data / "runs" / run_id / "config.json").read_text())
-    assert cfg["gpu"] == 1 and cfg["judge_gpu"] == 0 and cfg["data"]["prepared"].endswith("/abc")
+    assert cfg["gpus"] == [1, 0] and cfg["gpu"] == 1 and cfg["judge_gpu"] is None
+    assert cfg["data"]["prepared"].endswith("/abc")
+    assert runs.summary(run_id)["gpus"] == [1, 0]
 
 
-def test_no_spare_card_means_checks_on_the_training_card(run_settings, monkeypatch):
+def test_a_free_card_you_didnt_pick_judges(run_settings):
+    run_id = runs.create({**FORM, "gpus": [1]}, {"train": {}}, None)
+    assert run_settings == [(run_id, [1], 0)]
+
+
+def test_a_busy_card_neither_trains_unpicked_nor_judges(run_settings, monkeypatch):
     monkeypatch.setattr(runs.gpus, "list_gpus", lambda: {"gpus": [
         {"index": 0, "display": True, "busy": True}, {"index": 1, "display": False, "busy": False}]})
     run_id = runs.create(FORM, {"train": {}}, None)
-    assert run_settings == [(run_id, 1, None)]
+    assert run_settings == [(run_id, [1], None)]
+
+
+def test_cards_in_use_by_a_run_are_busy_until_it_ends(run_settings):
+    run_id = runs.create(FORM, {"train": {}}, None)
+    (config.settings.data / "runs" / run_id / "status.json").write_text(json.dumps(
+        {"state": "running", "pid": os.getpid()}))  # this test process stands in for the trainer
+    assert runs.busy_gpus() == {0: run_id, 1: run_id}
+    with pytest.raises(ValueError, match="None of the picked GPUs is free"):
+        runs.create(FORM, {"train": {}}, None)
+
+
+def test_several_cards_start_through_torchrun():
+    one = runs.command("anvil.train", Path("/data/runs/r"), 1, ["--resume"])
+    assert one[1:] == ["-m", "anvil.train", "/data/runs/r", "--resume"]
+    two = runs.command("anvil.train", Path("/data/runs/r"), 2, [])
+    assert two[1:] == ["-m", "torch.distributed.run", "--standalone", "--nproc-per-node=2", "-m", "anvil.train",
+                       "/data/runs/r"]
 
 
 def test_a_judge_still_checking_after_stop_keeps_its_card_and_serves_the_resume(run_settings, monkeypatch):
-    run_id = runs.create(FORM, {"train": {}}, None)
+    run_id = runs.create({**FORM, "gpus": [1]}, {"train": {}}, None)
     path = config.settings.data / "runs" / run_id
     me = os.getpid()  # stands in for live processes
     (path / "status.json").write_text(json.dumps({"state": "stopped", "step": 40}))
@@ -258,7 +283,7 @@ def test_a_judge_still_checking_after_stop_keeps_its_card_and_serves_the_resume(
     (path / "config.json").write_text(json.dumps(cfg))
     assert runs.busy_gpus() == {0: run_id}  # the trainer stopped, but its judge is still at work on GPU 0
     runs.resume(run_id, None)
-    assert run_settings[-1] == (run_id, 1, None)  # no second judge: the one still running carries on
+    assert run_settings[-1] == (run_id, [1], None)  # no second judge: the one still running carries on
     assert json.loads((path / "config.json").read_text())["judge_gpu"] == 0
 
 
@@ -405,3 +430,75 @@ def test_the_trainer_and_the_judge_never_overwrite_each_others_checks(tmp_path):
     board = picking.load(tmp_path)
     assert [e["step"] for e in board["entries"]] == list(range(1, 41))
     assert board["best_step"] == 40
+
+
+# ---------------------------------------------------------------- several cards at once (two CPU processes)
+
+def test_two_cards_learn_exactly_what_one_card_learns_from_the_whole_batch(tmp_path, tiny_model):
+    data = prepared(tmp_path, decision_rows(60), decision_rows(12, seed=1))
+    common = dict(maxSteps=6, every=3, gradCheckpointing=True)
+    one = make_run(tmp_path, run_config(tiny_model, data, batchSize=4, **common), "one")
+    two = make_run(tmp_path, run_config(tiny_model, data, batchSize=2, **common), "two")  # 2 per card × 2 cards
+    finish(start(one), one)
+    status = finish(start(two, cards=2), two)
+    assert status["state"] == "done" and status["world"] == 2 and status["items_per_step"] == 4
+
+    def by_step(run_dir, kind, key):
+        return {m["step"]: m[key] for m in metrics(run_dir) if m["type"] == kind}
+
+    a, b = by_step(one, "train", "loss"), by_step(two, "train", "loss")
+    assert sorted(a) == sorted(b) == [1, 2, 3, 4, 5, 6]
+    assert np.allclose([a[k] for k in sorted(a)], [b[k] for k in sorted(b)], rtol=1e-3, atol=1e-5), (a, b)
+    va, vb = by_step(one, "eval", "val_loss"), by_step(two, "eval", "val_loss")
+    assert sorted(va) == sorted(vb) == [0, 3, 6]  # checks are shared across the cards and add up to the same
+    assert np.allclose([va[k] for k in sorted(va)], [vb[k] for k in sorted(vb)], rtol=1e-3, atol=1e-5), (va, vb)
+    assert by_step(two, "eval", "rows")[6] == by_step(one, "eval", "rows")[6]
+    assert (two / "model" / "adapter" / "adapter_config.json").exists()
+    assert "Traceback" not in (two / "log.txt").read_text()
+
+
+def test_two_cards_stop_together_and_resume(tmp_path, tiny_model):
+    data = prepared(tmp_path, decision_rows(400), decision_rows(8, seed=1))
+    run_dir = make_run(tmp_path, run_config(tiny_model, data, batchSize=2, maxSteps=200, every=1000))
+    proc = start(run_dir, cards=2)
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        status = json.loads((run_dir / "status.json").read_text()) if (run_dir / "status.json").exists() else {}
+        if status.get("state") == "running" and status.get("step", 0) >= 3:
+            break
+        time.sleep(0.05)
+    os.kill(status["pid"], signal.SIGTERM)  # what Stop does: the signal reaches process 0 only
+    stopped = finish(proc, run_dir)
+    assert stopped["state"] == "stopped" and 3 <= stopped["step"] < 200, stopped
+    state = json.loads((run_dir / "checkpoints" / f"step-{stopped['step']:07d}" / "state.json").read_text())
+    assert state["world"] == 2
+    done = finish(start(run_dir, resume=True, cards=2), run_dir)
+    assert done["state"] == "done" and done["step"] == 200
+
+
+def test_two_cards_stop_early_together(tmp_path, tiny_model):
+    data = prepared(tmp_path, decision_rows(80), decision_rows(12, seed=1))
+    cfg = run_config(tiny_model, data, batchSize=2, maxSteps=60, every=2, learningRate="1e-30", scheduler="constant")
+    cfg["checkpoints"].update(patience=1, keepBest=1)
+    run_dir = make_run(tmp_path, cfg)
+    status = finish(start(run_dir, cards=2), run_dir)
+    assert status["state"] == "done" and status["step"] == 4 and status["best_step"] == 2, status
+    assert status["early_stop"] == "Mean AUROC didn't improve for 1 checks in a row"
+
+
+def test_two_cards_with_a_judge(tmp_path, tiny_model):
+    data = prepared(tmp_path, decision_rows(40), decision_rows(12, seed=1))
+    cfg = run_config(tiny_model, data, batchSize=2, maxSteps=6, every=2)
+    cfg["judge_gpu"] = 2
+    run_dir = make_run(tmp_path, cfg)
+    (run_dir / "judge").mkdir()
+    env = {**os.environ, "ANVIL_DEVICE": "cpu", "HIP_VISIBLE_DEVICES": "", "CUDA_VISIBLE_DEVICES": "",
+           "PYTHONPATH": str(SERVER)}
+    judge = subprocess.Popen([sys.executable, "-m", "anvil.judge", str(run_dir)], env=env,
+                             stdout=(run_dir / "judge" / "log.txt").open("ab"), stderr=subprocess.STDOUT)
+    status = finish(start(run_dir, cards=2), run_dir)
+    assert judge.wait(timeout=240) == 0, (run_dir / "judge" / "log.txt").read_text()[-3000:]
+    assert status["state"] == "done"
+    checked = {m["step"] for m in metrics(run_dir) if m["type"] == "eval"}
+    assert checked == {0, 2, 4, 6}
+    assert status["final_test"]["step"] == status["best_step"]

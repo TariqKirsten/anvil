@@ -32,9 +32,9 @@ export function CheckpointSection({ form, update, errors }: SectionProps) {
         </Field>
       </div>
       <p className="hint">
-        Each checkpoint is scored on the validation set, and the best one becomes the model. With a spare GPU the
-        checks run there, so training doesn't pause for them. The test set is used once, at the end, on the best
-        checkpoint.
+        Each checkpoint is scored on the validation set, and the best one becomes the model. A free GPU you didn't
+        tick does the checks, so training doesn't pause for them; otherwise the training cards pause briefly and
+        check together. The test set is used once, at the end, on the best checkpoint.
       </p>
     </Section>
   );

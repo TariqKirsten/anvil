@@ -62,10 +62,13 @@ again is instant.
 
 ## Training
 
-**Start training** checks the whole form, then starts a separate trainer process on one GPU (one that doesn't drive a
-screen, if you picked several). The run gets its own page (Runs, top left) with progress, speed, time left, GPU
-memory, the loss and validation charts, a table of every validation check, the final test, the checkpoints and the
-log.
+**Start training** checks the whole form, then starts a separate trainer process. The run gets its own page (Runs,
+top left) with progress (steps and epochs), speed, time left, GPU memory, the loss and validation charts, a table of
+every validation check, the final test, the checkpoints and the log.
+
+- An **epoch** is one pass over the training rows. A **step** learns from one batch: batch size × the number of
+  training cards × gradient accumulation rows. The form shows how many steps an epoch takes; **Max steps** cuts a run
+  short (handy for quick tests).
 
 - **Decision models** train the letters way: each question lists its options as A, B, C… and the model's scores for
   the letters are its answer. Option order is shuffled per row so no letter is favoured; validation asks every question
@@ -78,13 +81,28 @@ log.
 - The finished model is in the run's folder: `model/adapter` and `model/merged` (for LoRA), or `model/merged`. Its
   `anvil.json` says which checkpoint it is and what it scored on the test set.
 
+### Several GPUs
+
+- Every GPU you tick trains. Each card holds a whole copy of the model and takes its own share of every batch, and
+  after each step the cards average their gradients, so the copies stay identical (data parallel, through torchrun;
+  `anvil/parallel.py`). Batch size is per card, so two cards learn from twice the rows per step and an epoch takes
+  half the steps.
+- Process 0 runs on a card that doesn't drive a screen if there is one. It writes the run's files, saves checkpoints
+  and finishes the run; Stop reaches it, and the cards agree every step on whether to stop.
+- A free GPU you didn't tick becomes the judge (below). Without one, the training cards pause at each checkpoint and
+  check it together, each scoring its share of the validation rows.
+- Resume needs the same cards, because the batches are split by how many there are.
+- A card that drives your screen can train too, but the desktop may stutter. Close video calls and games on it until
+  the run ends: on an R9700 a two-card run once hung the screen card during a video call (it needed a reboot); with
+  the call closed, the same run was fine.
+
 ### The judge: picking the best checkpoint
 
 - Every checkpoint gets a validation check, and so does the model before training (step 0, shown as the starting
   point, never picked). **Pick best by** names the number that ranks them; the run page highlights it.
-- If there's a free GPU besides the training one, a second process, the judge, does the checks there, so training
-  never pauses for them. Without one, training pauses briefly at each checkpoint. If the judge crashes, the trainer
-  takes over the checks.
+- If there's a free GPU you didn't tick, a separate process, the judge, does the checks there, so training never
+  pauses for them. Without one, training pauses briefly at each checkpoint. If the judge crashes, the trainer takes
+  over the checks.
 - Only the best **Keep best** checkpoints are kept, plus the newest (Resume starts there) and any not checked yet.
 - **Stop after no gain for** N checks ends training early once the score hasn't improved for N checks in a row
   (0 turns this off).
@@ -111,6 +129,7 @@ fast kernels for linear-attention models such as Qwen3.5. On an R9700 that makes
 | `server/anvil/` | The Python server: accounts and login, GPUs, the Hugging Face search, model checks, datasets, runs |
 | `server/anvil/train.py` | The trainer process; `tasks.py` holds what each kind of model learns and how it's scored |
 | `server/anvil/judge.py` | The judge process: checks checkpoints on a spare GPU; `picking.py` ranks them and decides when to stop |
+| `server/anvil/parallel.py` | Training on several GPUs at once: one process per card, gradients averaged every step |
 | `server/tests/` | `docker compose exec -w /workspace/server dev python -m pytest` |
 | `web/src/` | The React screen: `Finetune.tsx`, `Runs.tsx`, `RunPage.tsx`, `Settings.tsx`, sections in `sections/` |
 
@@ -125,5 +144,6 @@ Built in steps:
    run page.
 4. **The judge** (done): every checkpoint scored (on a spare GPU when there is one), the best kept and used as the
    model, early stopping, and a final test on the test set.
-5. Training on several GPUs at once.
+5. **Several GPUs** (done): every ticked card trains on its share of each batch; checks are shared, or run on a
+   free unticked card.
 6. The Clef decision head.

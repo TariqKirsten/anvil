@@ -79,8 +79,13 @@ def status(run_id: str) -> dict:
     return current
 
 
+def training_gpus(cfg: dict) -> list[int]:
+    """The cards a run trains on (runs from before multi-GPU training name just one)."""
+    return list(cfg.get("gpus") or [cfg["gpu"]])
+
+
 def busy_gpus() -> dict[int, str]:
-    """Cards used by anvil runs: the training card while it trains, and the judge's card while the judge runs (after
+    """Cards used by anvil runs: the training cards while they train, and the judge's card while the judge runs (after
     Stop it finishes the checkpoints it hasn't checked yet, so it can outlive the trainer for a while)."""
     busy = {}
     if runs_dir().exists():
@@ -89,7 +94,7 @@ def busy_gpus() -> dict[int, str]:
             if not cfg:
                 continue
             if status(path.name).get("state") in ACTIVE:
-                busy[cfg["gpu"]] = path.name
+                busy.update({gpu: path.name for gpu in training_gpus(cfg)})
             if _judge_running(path.name):
                 busy[judge_status(path.name)["gpu"]] = path.name
     return busy
@@ -97,8 +102,11 @@ def busy_gpus() -> dict[int, str]:
 
 # ---------------------------------------------------------------- starting
 
-def _choose_gpus(picked: list[int] | None) -> tuple[int, int | None]:
-    """The card to train on, and a spare card for the judge (None: checks run on the training card)."""
+def _choose_gpus(picked: list[int] | None) -> tuple[list[int], int | None]:
+    """The cards to train on, and a spare card for the judge (None: the training cards do the checks themselves).
+
+    Every picked card that's free trains. The first one is process 0, which also saves checkpoints and finishes the run,
+    so it's a card that doesn't drive a screen if there is one. The judge gets a free card you didn't pick."""
     found = gpus.list_gpus()["gpus"]
     if not found:
         raise ValueError("There's no GPU to train on.")
@@ -109,13 +117,10 @@ def _choose_gpus(picked: list[int] | None) -> tuple[int, int | None]:
     if not candidates:
         taken = [f"GPU {i} is training {busy[i]}" for i in picked if i in busy]
         raise ValueError("None of the picked GPUs is free" + (f" ({'; '.join(taken)})." if taken else "."))
-    # One card trains for now (several at once is step 5). Prefer one that doesn't also drive a screen.
     candidates.sort(key=lambda g: (g["display"], g["index"]))
-    train_gpu = candidates[0]["index"]
-    # The judge: a free card other than that one, a picked one first, then any card that isn't busy.
-    spare = [g for g in found if g["index"] != train_gpu and g["index"] not in busy and not g["busy"]]
-    spare.sort(key=lambda g: (g["index"] not in picked, g["index"]))
-    return train_gpu, spare[0]["index"] if spare else None
+    train = [g["index"] for g in candidates]
+    spare = [g["index"] for g in found if g["index"] not in train and g["index"] not in busy and not g["busy"]]
+    return train, min(spare) if spare else None
 
 
 def _model(form: dict, token: str | None) -> dict:
@@ -171,7 +176,7 @@ def create(form: dict, prepare: dict, token: str | None) -> str:
     if train_as == "lm":
         method = fmt  # for language models the data decides: chat, prompt and completion, or plain text
 
-    gpu, judge_gpu = _choose_gpus(form.get("gpus"))
+    train_gpus, judge_gpu = _choose_gpus(form.get("gpus"))
     run_id = _new_id(form.get("name") or "run")
     path = runs_dir() / run_id
     path.mkdir(parents=True)
@@ -184,7 +189,8 @@ def create(form: dict, prepare: dict, token: str | None) -> str:
         "model": model,
         "data": {"prepared": str(config.settings.prepared / job.fingerprint), "format": fmt,
                  "rows": job.report["rows"], "fingerprint": job.fingerprint},
-        "gpu": gpu,
+        "gpus": train_gpus,
+        "gpu": train_gpus[0],
         "judge_gpu": judge_gpu,
         "hyper": form["hyper"],
         "checkpoints": form["checkpoints"],
@@ -192,7 +198,7 @@ def create(form: dict, prepare: dict, token: str | None) -> str:
     }
     _write(path / "config.json", cfg)
     _write(path / "status.json", {"state": "starting", "stage": "Starting", "step": 0, "created": cfg["created"]})
-    _spawn(run_id, path, gpu, token, resume=False, judge_gpu=judge_gpu)
+    _spawn(run_id, path, train_gpus, token, resume=False, judge_gpu=judge_gpu)
     return run_id
 
 
@@ -205,32 +211,44 @@ def _new_id(name: str) -> str:
     return run_id
 
 
-def _start(module: str, key: str, path: Path, gpu: int, token: str | None, log_path: Path, args: list[str]) -> int:
+def command(module: str, path: Path, cards: int, args: list[str]) -> list[str]:
+    """One process, or with several cards one per card through torchrun (which also stops them all if one fails)."""
+    if cards == 1:
+        return [sys.executable, "-m", module, str(path)] + args
+    return [sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc-per-node={cards}",
+            "-m", module, str(path)] + args
+
+
+def _start(module: str, key: str, path: Path, cards: list[int], token: str | None, log_path: Path,
+           args: list[str]) -> int:
+    visible = ",".join(str(c) for c in cards)  # process N uses the Nth of these
     env = {k: v for k, v in os.environ.items() if k not in ("ROCR_VISIBLE_DEVICES", "HF_TOKEN")}
-    env.update(HIP_VISIBLE_DEVICES=str(gpu), CUDA_VISIBLE_DEVICES=str(gpu), PYTHONPATH=str(SERVER_DIR),
-               PYTHONUNBUFFERED="1")
+    env.update(HIP_VISIBLE_DEVICES=visible, CUDA_VISIBLE_DEVICES=visible, PYTHONPATH=str(SERVER_DIR),
+               PYTHONUNBUFFERED="1", OMP_NUM_THREADS=env.get("OMP_NUM_THREADS", "4"))
     if token:
         env["HF_TOKEN"] = token
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("ab")
+    where = f"GPU {cards[0]}" if len(cards) == 1 else f"GPUs {', '.join(map(str, cards))}"
     log.write(f"\n===== {module} {'resumed' if '--resume' in args else 'started'} "
-              f"{time.strftime('%Y-%m-%d %H:%M:%S')} on GPU {gpu} =====\n".encode())
+              f"{time.strftime('%Y-%m-%d %H:%M:%S')} on {where} =====\n".encode())
     log.flush()
     _processes[key] = subprocess.Popen(
-        [sys.executable, "-m", module, str(path)] + args, cwd=SERVER_DIR, env=env, stdout=log,
+        command(module, path, len(cards), args), cwd=SERVER_DIR, env=env, stdout=log,
         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     log.close()
     return _processes[key].pid
 
 
-def _spawn(run_id: str, path: Path, gpu: int, token: str | None, resume: bool, judge_gpu: int | None = None) -> None:
-    pid = _start("anvil.train", run_id, path, gpu, token, path / "log.txt", ["--resume"] if resume else [])
+def _spawn(run_id: str, path: Path, gpus: list[int], token: str | None, resume: bool,
+           judge_gpu: int | None = None) -> None:
+    pid = _start("anvil.train", run_id, path, gpus, token, path / "log.txt", ["--resume"] if resume else [])
     current = _read(path / "status.json", {}) or {}
     current.update(state="starting", stage="Starting", pid=pid, error=None, updated=time.time())
     _write(path / "status.json", current)
     if judge_gpu is not None:
         (path / "judge").mkdir(exist_ok=True)
-        judge_pid = _start("anvil.judge", f"{run_id}:judge", path, judge_gpu, token, path / "judge" / "log.txt", [])
+        judge_pid = _start("anvil.judge", f"{run_id}:judge", path, [judge_gpu], token, path / "judge" / "log.txt", [])
         _write(path / "judge" / "status.json", {"state": "starting", "stage": "Starting", "gpu": judge_gpu,
                                                 "pid": judge_pid, "updated": time.time()})
 
@@ -242,7 +260,8 @@ def summary(run_id: str) -> dict:
     cfg = _read(path / "config.json", {}) or {}
     st = status(run_id)
     return {"id": run_id, "name": cfg.get("name", run_id), "train_as": cfg.get("train_as"), "method": cfg.get("method"),
-            "model": (cfg.get("model") or {}).get("id"), "gpu": cfg.get("gpu"), "created": cfg.get("created"),
+            "model": (cfg.get("model") or {}).get("id"), "gpu": cfg.get("gpu"),
+            "gpus": training_gpus(cfg) if cfg.get("gpu") is not None else [], "created": cfg.get("created"),
             "state": st.get("state"), "stage": st.get("stage"), "step": st.get("step", 0), "total": st.get("total"),
             "updated": st.get("updated"), "last_eval": st.get("last_eval"), "error": st.get("error"),
             "best": picking.best(picking.load(path))}
@@ -316,13 +335,15 @@ def resume(run_id: str, token: str | None) -> None:
     if not Path(cfg["data"]["prepared"], "train.parquet").exists():
         raise ValueError("The prepared data for this run is gone. Prepare it again and start a new run.")
     busy = busy_gpus()
-    if cfg["gpu"] in busy:
-        raise ValueError(f"GPU {cfg['gpu']} is busy with {busy[cfg['gpu']]}. Resume when it's free.")
+    cards = training_gpus(cfg)  # the same cards again: the batches are split by how many there are
+    taken = [f"GPU {gpu} is busy with {busy[gpu]}" for gpu in cards if gpu in busy]
+    if taken:
+        raise ValueError(f"{'; '.join(taken)}. Resume when {'it is' if len(taken) == 1 else 'they are'} free.")
     judge_gpu = cfg.get("judge_gpu")
     if _judge_running(run_id):  # still checking from before the stop: it carries on with the resumed trainer
-        _spawn(run_id, path, cfg["gpu"], token, resume=True)
+        _spawn(run_id, path, cards, token, resume=True)
         return
-    if judge_gpu is not None and judge_gpu in busy:  # its card is taken now: check on the training card instead
+    if judge_gpu is not None and judge_gpu in busy:  # its card is taken now: the training cards check instead
         judge_gpu = cfg["judge_gpu"] = None
         _write(path / "config.json", cfg)
-    _spawn(run_id, path, cfg["gpu"], token, resume=True, judge_gpu=judge_gpu)
+    _spawn(run_id, path, cards, token, resume=True, judge_gpu=judge_gpu)

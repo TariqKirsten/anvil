@@ -90,7 +90,8 @@ export function Runs({ onLogout }: { onLogout: () => void }) {
                 <span className="run-main">
                   <span className="run-title">{r.name}</span>
                   <span className="run-meta">
-                    {r.model} · {r.train_as === "decision" ? "decision" : "language"} model · GPU {r.gpu} · {when(r.created)}
+                    {r.model} · {r.train_as === "decision" ? "decision" : "language"} model ·{" "}
+                    {r.gpus.length > 1 ? `GPUs ${r.gpus.join(", ")}` : `GPU ${r.gpu}`} · {when(r.created)}
                   </span>
                 </span>
                 <span className="run-progress">

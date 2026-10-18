@@ -213,16 +213,15 @@ class DecisionLetters:
             probs = torch.stack([torch.cat([p[:n].flip(0), p[n:]]) for p, n in zip(probs, counts)])
         return probs
 
-    @torch.no_grad()
     def evaluate(self, model, items: list[Item], parsed: dict, batch_size: int, autocast) -> dict:
-        """Scores on held-out rows. Every question is asked in its own option order and in the reverse order, and the
-        two answers are averaged, so a model that favours a letter isn't scored on that.
+        """Scores on held-out rows (see metrics)."""
+        return self.metrics(self.outputs(model, items, parsed, batch_size, autocast), len(items))
 
-        - val_loss, accuracy: over all questions
-        - ece: calibration error, how far "80% sure" is from being right 80% of the time (lower is better)
-        - per yes/no question: auroc_<name>, catch_<name> (share of yes caught when at most 1% of no is flagged),
-          and false_alarms_<name> (share of no flagged at a 0.5 cut-off); auroc, catch_rate, false_alarms average them
-        """
+    @torch.no_grad()
+    def outputs(self, model, items: list[Item], parsed: dict, batch_size: int, autocast) -> dict:
+        """The model's answer to each question, ready to be combined with other cards' shares and scored. Every
+        question is asked in its own option order and in the reverse order, and the two answers are averaged, so a
+        model that favours a letter isn't scored on that."""
         losses, correct, confidence, yes = [], [], [], {}
         order = sorted(range(len(items)), key=lambda i: len(parsed["state"][items[i].row]))
         for start in range(0, len(order), batch_size):
@@ -241,25 +240,49 @@ class DecisionLetters:
                     yes.setdefault(it.name, ([], []))
                     yes[it.name][0].append(float(p[0]))  # option 0 is "yes" in the question's own order
                     yes[it.name][1].append(bool(t[0] >= 0.5))
-        out = {"val_loss": float(np.mean(losses)), "accuracy": float(np.mean(correct)),
-               "ece": calibration_error(np.array(confidence), np.array(correct, dtype=bool)), "rows": len(items)}
+        return {"loss": losses, "correct": correct, "confidence": confidence, "yes": yes}
+
+    @staticmethod
+    def combine(parts: list[dict]) -> dict:
+        """Several cards' outputs as one."""
+        out = {"loss": [], "correct": [], "confidence": [], "yes": {}}
+        for part in parts:
+            for key in ("loss", "correct", "confidence"):
+                out[key] += part[key]
+            for name, (p, y) in part["yes"].items():
+                mine = out["yes"].setdefault(name, ([], []))
+                mine[0].extend(p)
+                mine[1].extend(y)
+        return out
+
+    @staticmethod
+    def metrics(out: dict, rows: int) -> dict:
+        """
+        - val_loss, accuracy: over all questions
+        - ece: calibration error, how far "80% sure" is from being right 80% of the time (lower is better)
+        - per yes/no question: auroc_<name>, catch_<name> (share of yes caught when at most 1% of no is flagged),
+          and false_alarms_<name> (share of no flagged at a 0.5 cut-off); auroc, catch_rate, false_alarms average them
+        """
+        correct = np.array(out["correct"], dtype=bool)
+        result = {"val_loss": float(np.mean(out["loss"])), "accuracy": float(correct.mean()),
+                  "ece": calibration_error(np.array(out["confidence"]), correct), "rows": rows}
         per = {"auroc": [], "catch": [], "false_alarms": []}
-        for name, (p, y) in yes.items():
+        for name, (p, y) in sorted(out["yes"].items()):
             p, y = np.array(p), np.array(y)
             value = auroc(p, y)
             if value is None:
                 continue
             caught = catch_rate(p, y, 0.01)
             alarms = float((p[~y] >= 0.5).mean())
-            out[f"auroc_{name}"], out[f"catch_{name}"], out[f"false_alarms_{name}"] = value, caught, alarms
+            result[f"auroc_{name}"], result[f"catch_{name}"], result[f"false_alarms_{name}"] = value, caught, alarms
             per["auroc"].append(value)
             per["catch"].append(caught)
             per["false_alarms"].append(alarms)
         if per["auroc"]:
-            out["auroc"] = float(np.mean(per["auroc"]))
-            out["catch_rate"] = float(np.mean(per["catch"]))
-            out["false_alarms"] = float(np.mean(per["false_alarms"]))
-        return out
+            result["auroc"] = float(np.mean(per["auroc"]))
+            result["catch_rate"] = float(np.mean(per["catch"]))
+            result["false_alarms"] = float(np.mean(per["false_alarms"]))
+        return result
 
 
 def catch_rate(scores: np.ndarray, labels: np.ndarray, false_alarm_rate: float) -> float:
@@ -379,8 +402,11 @@ class LanguageModel:
         total, count = self._sum_and_count(model, batch)
         return total / max(count, 1)
 
-    @torch.no_grad()
     def evaluate(self, model, items: list[int], parsed: dict, batch_size: int, autocast) -> dict:
+        return self.metrics(self.outputs(model, items, parsed, batch_size, autocast), len(items))
+
+    @torch.no_grad()
+    def outputs(self, model, items: list[int], parsed: dict, batch_size: int, autocast) -> dict:
         total, count = 0.0, 0
         for start in range(0, len(items), batch_size):
             batch = self.collate(items[start:start + batch_size], parsed)
@@ -388,8 +414,16 @@ class LanguageModel:
                 s, n = self._sum_and_count(model, batch)
             total += float(s)
             count += n
-        loss = total / max(count, 1)
-        return {"val_loss": loss, "perplexity": float(math.exp(min(loss, 50)))}
+        return {"total": total, "count": count}
+
+    @staticmethod
+    def combine(parts: list[dict]) -> dict:
+        return {"total": sum(p["total"] for p in parts), "count": sum(p["count"] for p in parts)}
+
+    @staticmethod
+    def metrics(out: dict, rows: int) -> dict:
+        loss = out["total"] / max(out["count"], 1)
+        return {"val_loss": loss, "perplexity": float(math.exp(min(loss, 50))), "rows": rows}
 
 
 def length_grouped_batches(lengths: np.ndarray, batch_size: int, rng: random.Random, chunk: int = 4096) -> list[list[int]]:

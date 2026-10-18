@@ -13,32 +13,46 @@ export function pickedGpus(form: FormState, list: GpuList | null): number[] {
   return form.gpus.filter((i) => gpus.some((g) => g.index === i));
 }
 
-// What a run does with the cards: the same choice the server makes (runs._choose_gpus). One card trains for now
-// (several at once is step 5), preferring one that doesn't drive a screen. Another free card, a ticked one first,
-// checks the checkpoints, so training never pauses for them.
+// What a run does with the cards: the same choice the server makes (runs._choose_gpus). Every ticked card trains, each
+// on its share of every batch, led by one that doesn't drive a screen. A free card you didn't tick checks the
+// checkpoints, so training never pauses for them; without one, the training cards pause and check together.
 function plan(gpus: Gpu[], picked: Set<number>) {
   const trains = gpus
     .filter((g) => picked.has(g.index))
-    .sort((a, b) => Number(a.display) - Number(b.display) || a.index - b.index)[0];
-  const checks = gpus
-    .filter((g) => g !== trains && !g.busy)
-    .sort((a, b) => Number(!picked.has(a.index)) - Number(!picked.has(b.index)) || a.index - b.index)[0];
+    .sort((a, b) => Number(a.display) - Number(b.display) || a.index - b.index);
+  const checks = gpus.filter((g) => !picked.has(g.index) && !g.busy).sort((a, b) => a.index - b.index)[0];
   return { trains, checks };
+}
+
+// "GPU 1", "GPUs 1 and 0", "GPUs 1, 2 and 0"
+function names(cards: Gpu[]) {
+  const ids = cards.map((g) => String(g.index));
+  return ids.length === 1 ? `GPU ${ids[0]}` : `GPUs ${ids.slice(0, -1).join(", ")} and ${ids[ids.length - 1]}`;
 }
 
 function note(gpus: Gpu[], picked: Set<number>) {
   const { trains, checks } = plan(gpus, picked);
-  if (!trains) return { main: "Pick at least one card.", bad: true, warnings: [] as string[], info: [] as string[] };
-  const main = checks
-    ? `GPU ${trains.index} trains. GPU ${checks.index} checks the checkpoints, so training never pauses for them.`
-    : `GPU ${trains.index} trains, and pauses briefly at each checkpoint to check it.`;
-  const warnings = trains.busy
-    ? [`GPU ${trains.index} is busy (${trains.used_gb} GB in use), so training there may run out of memory.`]
-    : [];
+  if (!trains.length) return { main: "Pick at least one card.", bad: true, warnings: [] as string[], info: [] as string[] };
+  const together = trains.length > 1;
+  const main =
+    (together ? `${names(trains)} train together, each on its share of every batch.` : `${names(trains)} trains.`) +
+    (checks
+      ? ` GPU ${checks.index} checks the checkpoints, so training never pauses for them.`
+      : together
+        ? " At each checkpoint they pause briefly and check it together."
+        : " It pauses briefly at each checkpoint to check it.");
+  const warnings = trains
+    .filter((g) => g.busy)
+    .map((g) => `GPU ${g.index} is busy (${g.used_gb} GB in use), so training there may run out of memory.`);
+  const sizes = [...new Set(trains.map((g) => Math.round(g.total_gb)))];
+  if (sizes.length > 1)
+    warnings.push(`The cards differ in memory: the batch has to fit on the ${Math.min(...sizes)} GB card, and the slowest card sets the pace.`);
   const info: string[] = [];
-  if (checks && !picked.has(checks.index)) info.push(`GPU ${checks.index} isn't ticked, but it's free, so it does the checks.`);
-  if (picked.size > 1) info.push("For now a run trains on one card. Training on several at once arrives in step 5.");
-  if (trains.display) info.push(`GPU ${trains.index} also drives your screen, so the desktop may stutter while it trains.`);
+  if (checks && together) info.push(`GPU ${checks.index} isn't ticked but it's free, so it does the checks.`);
+  else if (checks) info.push(`GPU ${checks.index} isn't ticked but it's free, so it does the checks. Tick it to train on it too.`);
+  else if (together) info.push("To check without pausing, untick a card: a free card you didn't tick does the checks.");
+  for (const g of trains.filter((g) => g.display))
+    info.push(`GPU ${g.index} also drives your screen, so the desktop may stutter while it trains. Close video calls and games on it until the run ends.`);
   if (checks?.display) info.push(`GPU ${checks.index} drives your screen, so the desktop may stutter during checks.`);
   return { main, bad: false, warnings, info };
 }

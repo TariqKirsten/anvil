@@ -1,8 +1,9 @@
-"""The training process: one run, one GPU. The server (anvil.runs) starts it as
+"""The training process. The server (anvil.runs) starts it as
 
     python -m anvil.train /data/runs/<id> [--resume]
 
-with HIP_VISIBLE_DEVICES set to the chosen card. It reads the run's config.json, trains, and reports through files:
+with HIP_VISIBLE_DEVICES set to the chosen card, or, to train on several cards at once, once per card through
+torchrun (see anvil.parallel). It reads the run's config.json, trains, and reports through files:
 - status.json       what it's doing right now: state, stage, step of total, speed, ETA, memory, error
 - metrics.jsonl     one line per logged step (training loss), per validation check, and the final test
 - leaderboard.json  every check's score on the "pick best by" metric, and the best checkpoint so far (anvil.picking)
@@ -70,6 +71,42 @@ class Reporter:
         self.metrics.flush()
         print(" ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in entry.items()), flush=True)
 
+    def fail(self, message: str) -> None:
+        self.update(state="failed", stage="Failed", error=message, eta_s=None)
+
+
+class Silent(Reporter):
+    """The other cards of a multi-GPU run: process 0 reports for the run, so they say nothing, unless they fail."""
+
+    def __init__(self, run_dir: Path, card: int | None):
+        self.dir, self.path, self.card, self.status = run_dir, run_dir / "status.json", card, {}
+
+    def update(self, **fields) -> None:
+        pass
+
+    def metric(self, entry: dict) -> None:
+        pass
+
+    def fail(self, message: str) -> None:
+        try:
+            status = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            status = {}
+        where = f"GPU {self.card}" if self.card is not None else "Another card"
+        status.update(state="failed", stage="Failed", error=f"{where}: {message}", eta_s=None, updated=time.time())
+        write_json(self.path, status)
+
+
+def _quiet_libraries() -> None:
+    """The other cards would repeat every warning and progress bar process 0 already shows."""
+    try:
+        from transformers.utils import logging
+
+        logging.set_verbosity_error()
+        logging.disable_progress_bar()
+    except ImportError:
+        pass
+
 
 def friendly(error: BaseException) -> str:
     import torch
@@ -88,6 +125,8 @@ def device_and_dtype(cfg: dict):
     import torch
 
     device = torch.device(os.environ.get("ANVIL_DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu"))
+    if device.type == "cuda" and device.index is None:  # with several cards, process N uses the Nth visible one
+        device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", "0")))
     dtype = torch.bfloat16 if cfg["hyper"]["precision"] == "bf16" else torch.float16
 
     def autocast():
@@ -221,7 +260,7 @@ def judge_alive(run_dir: Path) -> bool:
 
 # ---------------------------------------------------------------- training
 
-def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
+def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> None:
     import numpy as np
     import torch
 
@@ -233,6 +272,8 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     device, dtype, autocast = device_and_dtype(cfg)
+    group.start(device)
+    say = print if group.main else (lambda *args, **kwargs: None)  # process 0 speaks for the run
     lora = cfg["training_type"] == "lora"
     pick_by = ck.get("pickBy", "val_loss")
     keep_best, patience = int(ck.get("keepBest", 3)), int(ck.get("patience", 0))
@@ -242,7 +283,9 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
     train_df = read_split(cfg, "train", None)
     val_df = read_split(cfg, "validation", VAL_ROWS)
 
-    resume_from = checkpoints(run_dir)[-1] if resume and checkpoints(run_dir) else None
+    found = checkpoints(run_dir)
+    resume_from = group.share(str(found[-1]) if resume and found else None)  # every card resumes from the same one
+    resume_from = Path(resume_from) if resume_from else None
     report.update(stage="Loading the model (downloading it first if needed)")
     tok, model = load_model(cfg, device, dtype, resume_from)
 
@@ -251,8 +294,10 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
     items, parsed = task.items(train_df)
     val_items, val_parsed = task.items(val_df)
     lengths = task.lengths(items, parsed)
-    batch_size, accum = int(h["batchSize"]), int(h["gradAccum"])
-    batches_per_epoch = math.ceil(len(items) / batch_size)
+    world = group.world
+    per_card, accum = int(h["batchSize"]), int(h["gradAccum"])
+    per_batch = per_card * world  # one batch is split across the cards: each takes batch size rows of it
+    batches_per_epoch = math.ceil(len(items) / per_batch)
     steps_per_epoch = max(1, math.ceil(batches_per_epoch / accum))
     total = int(h.get("maxSteps") or 0) or steps_per_epoch * int(h["epochs"])
 
@@ -280,35 +325,45 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
         random.setstate(saved["rng"]["python"])
         torch.set_rng_state(saved["rng"]["torch"].cpu())  # map_location moved it to the GPU; it must live on the CPU
         step, epoch, batch_index = state["step"], state["epoch"], state["batch_index"]
+        if state.get("world", 1) != world:
+            raise ValueError(f"This run trained on {state.get('world', 1)} GPUs, so it must resume on as many.")
         report.metric({"type": "resume", "step": step})
+    learner = group.wrap(model, task)
 
     n_trainable = sum(p.numel() for p in trainable)
     n_all = sum(p.numel() for p in model.parameters())
-    print(f"{len(items):,} training items, {len(val_items):,} validation items; {total:,} steps "
-          f"({steps_per_epoch:,} per epoch); training {n_trainable / 1e6:.1f}M of {n_all / 1e9:.2f}B parameters "
-          f"on {device}; checks {'on the judge GPU' if judged_elsewhere else 'here'}", flush=True)
+    cards = f"{world} cards" if world > 1 else str(device)
+    say(f"{len(items):,} training items, {len(val_items):,} validation items; {total:,} steps "
+        f"({steps_per_epoch:,} per epoch, {per_batch * accum:,} items per step); training {n_trainable / 1e6:.1f}M "
+        f"of {n_all / 1e9:.2f}B parameters on {cards}; checks {'on the judge GPU' if judged_elsewhere else 'here'}",
+        flush=True)
     report.update(state="running", stage="Training", step=step, total=total, epoch=epoch,
-                  trainable_m=round(n_trainable / 1e6, 1), items=len(items))
+                  trainable_m=round(n_trainable / 1e6, 1), items=len(items), world=world,
+                  steps_per_epoch=steps_per_epoch, items_per_step=per_batch * accum)
 
     board = picking.load(run_dir)
 
-    def check(at_step: int) -> dict:
-        """A validation check here, recorded on the leaderboard."""
+    def check(at_step: int) -> None:
+        """A validation check, shared across the cards, recorded on the leaderboard."""
         nonlocal board
         report.update(stage="Checking on validation")
         model.eval()
-        metrics = task.evaluate(model, val_items, val_parsed, max(1, batch_size * 2), autocast)
+        out = task.outputs(model, val_items[group.rank::world], val_parsed, max(1, per_card * 2), autocast)
         model.train()
+        metrics = task.metrics(task.combine(group.gather(out)), len(val_items))
+        if not group.main:
+            return
         report.metric({"type": "eval", "step": at_step, "by": "trainer", **metrics})
         with picking.updating(run_dir) as board:
             picking.record(board, at_step, metrics, pick_by)
         report.update(stage="Training", last_eval={"step": at_step, **metrics}, best_step=board.get("best_step"))
-        return metrics
 
     def checkpoint() -> None:
+        if not group.main:  # the copies are identical, so process 0 saves for every card
+            return
         report.update(stage="Saving a checkpoint")
-        save_checkpoint(run_dir, model, tok, opt, sched,
-                        {"step": step, "epoch": epoch, "batch_index": batch_index, "saved": time.time()}, lora)
+        save_checkpoint(run_dir, model, tok, opt, sched, {"step": step, "epoch": epoch, "batch_index": batch_index,
+                                                          "world": world, "saved": time.time()}, lora)
         if not judged_elsewhere:  # with a judge, the judge keeps the best and deletes the rest
             prune(run_dir, picking.keep(board, keep_best, [step_of(p) for p in checkpoints(run_dir)]))
         report.update(stage="Training", checkpoints=[p.name for p in checkpoints(run_dir)])
@@ -318,35 +373,46 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
 
     every = int(ck["every"])
     log_every = max(1, min(50, total // 200))
-    if STOP["requested"]:  # Stop pressed while the model was loading: nothing trained, nothing to save
+    if group.any(STOP["requested"]):  # Stop pressed while the model was loading: nothing trained, nothing to save
         report.update(state="stopped", stage="Stopped", step=step, stopped=time.time())
+        group.end(wait=True)
         return
-    if step == 0 and not judged_elsewhere and 0 not in {e["step"] for e in board["entries"]}:
+    if step == 0 and not judged_elsewhere and group.share(0 not in {e["step"] for e in board["entries"]}):
         check(0)  # the score before any training, as the starting point of the chart
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
     model.train()
-    losses, tokens, skipped, micro = [], 0, 0, 0
+    # This step's loss, loss count and tokens on this card; the window's, all cards together, since the last log line.
+    mine = [0.0, 0, 0]
+    window = [0.0, 0, 0]
+    skipped, micro = 0, 0
     # Speed and ETA come from recent steps only: the first steps include one-time kernel compiling, and validation
     # pauses aren't training speed.
     window_start, window_step, step_rate = time.time(), step, None
     finished, early = step >= total, None
     while not finished:
-        batches = tasks.length_grouped_batches(lengths, batch_size, random.Random(seed + epoch))
+        batches = tasks.length_grouped_batches(lengths, per_batch, random.Random(seed + epoch))
         for bi in range(batch_index, len(batches)):
-            batch = task.collate([items[i] for i in batches[bi]], parsed, shuffle=True)
-            with autocast():
-                loss = task.loss(model, batch)
-            if not torch.isfinite(loss):  # rare half-precision overflows: skip the batch, don't poison the weights
-                skipped += 1
-                opt.zero_grad(set_to_none=True)
-                micro = 0
+            if len(batches[bi]) < world:  # the data's last few rows: too few to give every card one
                 continue
-            (loss / accum).backward()
+            last = micro + 1 >= accum or bi + 1 >= len(batches)  # the step's last batch: update the weights after it
+            batch = task.collate([items[i] for i in batches[bi][group.rank::world]], parsed, shuffle=True)
+            with group.accumulating(learner, sync=last):
+                with autocast():
+                    loss = learner(batch)
+                if not group.all(bool(torch.isfinite(loss))):
+                    # A rare half-precision overflow on some card: every card skips the batch, so none of them poisons
+                    # the weights and they stay in step.
+                    skipped += 1
+                    opt.zero_grad(set_to_none=True)
+                    micro = 0
+                    continue
+                (loss / accum).backward()
             micro += 1
-            losses.append(float(loss.detach()))
-            tokens += batch["tokens"]
-            if micro < accum and bi + 1 < len(batches):
+            mine[0] += float(loss.detach())
+            mine[1] += 1
+            mine[2] += batch["tokens"]
+            if not last:
                 continue
             micro = 0
             torch.nn.utils.clip_grad_norm_(trainable, 1.0)
@@ -355,37 +421,49 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
             opt.zero_grad(set_to_none=True)
             step += 1
             batch_index = bi + 1
-            if step % log_every == 0 or step == total:
+            # The cards agree, every step, on whether to stop (Stop reaches process 0 only) and on the loss and tokens.
+            judge_says = early_stop_reason() if group.main and judged_elsewhere else None
+            agreed = group.sum([STOP["requested"], judge_says is not None, *mine])
+            stop = agreed[0] > 0
+            window = [w + a for w, a in zip(window, agreed[2:])]
+            mine = [0.0, 0, 0]
+            if group.main and (step % log_every == 0 or step == total):
                 seconds = max(time.time() - window_start, 1e-9)
                 rate = (step - window_step) / seconds
                 step_rate = rate if step_rate is None else 0.7 * step_rate + 0.3 * rate
-                entry = {"type": "train", "step": step, "epoch": epoch, "loss": float(np.mean(losses)),
-                         "lr": float(sched.get_last_lr()[0]), "tokens_per_s": tokens / seconds}
+                entry = {"type": "train", "step": step, "epoch": epoch, "loss": window[0] / max(window[1], 1),
+                         "lr": float(sched.get_last_lr()[0]), "tokens_per_s": window[2] / seconds}
                 if device.type == "cuda":
                     entry["peak_mem_gb"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
                 report.metric(entry)
                 report.update(step=step, epoch=epoch, loss=entry["loss"], tokens_per_s=entry["tokens_per_s"],
                               peak_mem_gb=entry.get("peak_mem_gb"), skipped=skipped,
                               eta_s=(total - step) / step_rate if step_rate else None)
-                losses, tokens = [], 0
+            if step % log_every == 0 or step == total:
+                window = [0.0, 0, 0]
                 window_start, window_step = time.time(), step
             at_checkpoint = step % every == 0 or step == total
-            if at_checkpoint and judged_elsewhere and not judge_alive(run_dir):
+            if at_checkpoint and judged_elsewhere and not group.share(judge_alive(run_dir) if group.main else None):
                 # The judge crashed or hung: check here from now on, so checkpoints don't pile up unchecked and
                 # early stopping still works. finish() checks the ones it missed.
-                print("the judge stopped, so checks run here from now on", flush=True)
+                say("the judge stopped, so checks run here from now on", flush=True)
                 judged_elsewhere, board = False, picking.load(run_dir)
             if at_checkpoint and not judged_elsewhere:
                 check(step)
-            if at_checkpoint or STOP["requested"]:
+            if at_checkpoint or stop:
                 checkpoint()
-            if at_checkpoint:
-                window_start, window_step, tokens = time.time(), step, 0
-            if STOP["requested"]:
+            if at_checkpoint:  # the check and the save aren't training time
+                window[2] = 0
+                window_start, window_step = time.time(), step
+            if stop:
                 report.update(state="stopped", stage="Stopped", step=step, eta_s=None, stopped=time.time())
-                print(f"stopped at step {step}; resume continues from here", flush=True)
+                say(f"stopped at step {step}; resume continues from here", flush=True)
+                group.end(wait=True)
                 return
-            early = early_stop_reason() if (at_checkpoint or judged_elsewhere) else None
+            if judge_says is not None or agreed[1] > 0:
+                early = judge_says or "the judge's leaderboard says so"
+            elif at_checkpoint and not judged_elsewhere:
+                early = group.share(early_stop_reason() if group.main else None)
             if early or step >= total:
                 finished = True
                 break
@@ -393,10 +471,12 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
             epoch += 1
             batch_index = 0
     if early:
-        print(f"stopping early at step {step}: {early}", flush=True)
+        say(f"stopping early at step {step}: {early}", flush=True)
         report.metric({"type": "early_stop", "step": step, "reason": early})
 
-    finish(cfg, run_dir, report, model, tok, task, step, early, board, device, dtype, autocast)
+    group.end(wait=True)  # every card stops at the same step; from here on process 0 works alone
+    if group.main:
+        finish(cfg, run_dir, report, model, tok, task, step, early, board, device, dtype, autocast)
 
 
 def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, early: str | None, board: dict,
@@ -469,23 +549,32 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
 
 
 def main() -> None:
+    from . import parallel
+
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("run_dir")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     run_dir = Path(args.run_dir)
     cfg = json.loads((run_dir / "config.json").read_text())
-    report = Reporter(run_dir)
+    group = parallel.Group()
+    if group.main:
+        report = Reporter(run_dir)
+    else:
+        report = Silent(run_dir, card=(cfg.get("gpus") or [None] * group.world)[group.rank])
+        _quiet_libraries()
     signal.signal(signal.SIGTERM, _ask_to_stop)
     signal.signal(signal.SIGINT, _ask_to_stop)
     report.update(state="loading", stage="Starting", pid=os.getpid(), error=None, early_stop=None,
                   started=report.status.get("started") or time.time(), stopped=None)
     try:
-        train(cfg, run_dir, report, args.resume)
+        train(cfg, run_dir, report, args.resume, group)
     except BaseException as error:  # everything ends in a status the screen can show
         traceback.print_exc()
-        report.update(state="failed", stage="Failed", error=friendly(error), eta_s=None)
+        report.fail(friendly(error))
         sys.exit(1)
+    finally:
+        group.end()
 
 
 if __name__ == "__main__":

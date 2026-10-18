@@ -107,6 +107,8 @@ export interface PrepareReport {
   examples: Partial<Record<Slot, Problem[]>>;
   removed: Partial<Record<Slot, { exact: number; near: number; conflicts: number }>>;
   leaks: Partial<Record<Slot, number>>;
+  // Decision data: the questions in train, which is what a training step's batch counts (rows can hold several).
+  items?: { train: number };
   given: { validation: boolean; test: boolean };
   notes: string[];
   seconds: number;
@@ -133,6 +135,7 @@ export interface RunSummary {
   method: string;
   model: string;
   gpu: number;
+  gpus: number[];
   created: number;
   state: RunState;
   stage: string;
@@ -160,6 +163,9 @@ export interface RunStatus {
   stopped?: number | null;
   error?: string | null;
   items?: number;
+  world?: number;
+  steps_per_epoch?: number;
+  items_per_step?: number;
   trainable_m?: number;
   last_eval?: Record<string, number>;
   best_step?: number | null;
@@ -183,6 +189,7 @@ export interface RunDetail {
     model: { id: string; params: number | null };
     data: { format: string; rows: Record<string, number> };
     gpu: number;
+    gpus?: number[];
     judge_gpu?: number | null;
     hyper: Record<string, number | string | boolean>;
     checkpoints: { every: number; keepBest: number; patience: number; pickBy: string };

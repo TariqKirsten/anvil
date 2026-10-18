@@ -113,6 +113,8 @@ def test_prepare_removes_copies_and_keeps_states_on_one_side(data_settings):
     states = {s: set(pd.read_parquet(out / f"{s}.parquet")["state"]) for s in datasets.SPLITS}
     assert not states["train"] & states["test"] and not states["train"] & states["validation"]
     assert report["rows"]["test"] >= 10 and report["rows"]["validation"] >= 10
+    train = pd.read_parquet(out / "train.parquet")
+    assert report["items"]["train"] == sum(len(json.loads(q)) for q in train["questions"])  # questions, not rows
 
 
 def test_near_copies_stay_together_even_when_kept(data_settings):

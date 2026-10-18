@@ -25,6 +25,21 @@ function stepOf(checkpoint: string) {
   return Number(checkpoint.replace("step-", ""));
 }
 
+// "GPU 1", "GPUs 1 and 0"
+function cardNames(cards: number[]) {
+  return cards.length === 1 ? `GPU ${cards[0]}` : `GPUs ${cards.slice(0, -1).join(", ")} and ${cards[cards.length - 1]}`;
+}
+
+// Where the run is in its passes over the training data: "Epoch 1 of 2 · 40% through it".
+function epochLine(st: RunDetail["status"]) {
+  const perEpoch = st.steps_per_epoch;
+  if (!perEpoch || !st.total) return null;
+  const epochs = Math.max(1, Math.ceil(st.total / perEpoch));
+  const current = Math.min(epochs, Math.floor(st.step / perEpoch) + 1);
+  const pct = (100 * (st.step - (current - 1) * perEpoch)) / perEpoch;
+  return `Epoch ${current} of ${epochs} · ${pct > 0 && pct < 1 ? pct.toFixed(1) : Math.round(pct)}% through it`;
+}
+
 function duration(seconds: number | null | undefined) {
   if (seconds == null || !Number.isFinite(seconds)) return "–";
   const s = Math.round(seconds);
@@ -112,6 +127,8 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   // Checkpoints the judge hasn't got to yet (not counting the one it's checking right now).
   const waiting = Math.max(0, run.checkpoints.map(stepOf).filter((s) => !scores.has(s)).length - (judge?.state === "checking" ? 1 : 0));
   const test = st.final_test;
+  const cards = cfg.gpus ?? [cfg.gpu];
+  const epoch = epochLine(st);
   const pct = st.total ? Math.min(100, (st.step / st.total) * 100) : 0;
   const elapsed = st.started ? (st.finished ?? st.stopped ?? (ACTIVE.has(st.state) ? Date.now() / 1000 : st.started)) - st.started : null;
   const columns: [string, string, string][] = decision
@@ -145,7 +162,8 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
             <p className="hint">
               {cfg.model.id} · {decision ? `decision model (${cfg.method})` : `language model (${cfg.method})`} ·{" "}
               {cfg.training_type === "lora" ? "LoRA" : "full fine-tuning"} ·{" "}
-              {cfg.judge_gpu != null ? `trains on GPU ${cfg.gpu}, checks on GPU ${cfg.judge_gpu}` : `GPU ${cfg.gpu}`} ·
+              {cfg.judge_gpu != null ? `trains on ${cardNames(cards)}, checks on GPU ${cfg.judge_gpu}`
+                : cards.length > 1 ? `trains on ${cardNames(cards)}` : `GPU ${cards[0]}`} ·
               started {when(cfg.created)}
             </p>
           </div>
@@ -170,13 +188,20 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
             {st.total ? `Step ${st.step.toLocaleString()} of ${st.total.toLocaleString()}` : st.stage}
             {ACTIVE.has(st.state) && st.total ? ` · ${st.stage}` : ""}
           </span>
+          {epoch && (
+            <span>
+              {epoch}
+              {st.items_per_step ? ` · ${st.items_per_step.toLocaleString()} rows per step` : ""}
+              {(st.world ?? 1) > 1 ? ` on ${st.world} cards` : ""}
+            </span>
+          )}
         </div>
 
         <div className="stats">
           <div><span className="stat-label">{ACTIVE.has(st.state) ? "Time so far" : "Time taken"}</span><span className="stat-value">{duration(elapsed)}</span></div>
           <div><span className="stat-label">Time left</span><span className="stat-value">{ACTIVE.has(st.state) ? duration(st.eta_s) : "–"}</span></div>
           <div><span className="stat-label">Speed</span><span className="stat-value">{st.tokens_per_s ? `${Math.round(st.tokens_per_s).toLocaleString()} tok/s` : "–"}</span></div>
-          <div><span className="stat-label">GPU memory (peak)</span><span className="stat-value">{st.peak_mem_gb ? `${st.peak_mem_gb} GB` : "–"}</span></div>
+          <div><span className="stat-label">{cards.length > 1 ? "GPU memory (peak, per card)" : "GPU memory (peak)"}</span><span className="stat-value">{st.peak_mem_gb ? `${st.peak_mem_gb} GB` : "–"}</span></div>
         </div>
 
         {judge && (ACTIVE.has(st.state) || judge.state === "failed") && (

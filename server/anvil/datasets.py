@@ -458,6 +458,8 @@ def prepare(request: dict, token: str | None, out_dir: Path, progress: Progress 
     for name, (frame, rows) in chosen.items():
         frame.iloc[rows].reset_index(drop=True).to_parquet(out_dir / f"{name}.parquet", index=False)
         report["rows"][name] = int(len(rows))
+    if fmt == "decision":  # a decision model trains on (row, question) pairs, so these are what a step's batch counts
+        report["items"] = {"train": int(sum(len(_value(q)) for q in frames["train"]["questions"].iloc[cut["train"]]))}
     report["given"] = {name: name in parsed for name in ("validation", "test")}
     report["seconds"] = round(time.time() - started, 1)
     (out_dir / "request.json").write_text(json.dumps(
