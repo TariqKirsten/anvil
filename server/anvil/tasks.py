@@ -215,9 +215,15 @@ class DecisionLetters:
 
     @torch.no_grad()
     def evaluate(self, model, items: list[Item], parsed: dict, batch_size: int, autocast) -> dict:
-        """Loss, accuracy, and AUROC per yes/no question. Every question is asked in its own option order and in the
-        reverse order, and the two answers are averaged, so a model that favours a letter isn't scored on that."""
-        losses, correct, yes = [], [], {}
+        """Scores on held-out rows. Every question is asked in its own option order and in the reverse order, and the
+        two answers are averaged, so a model that favours a letter isn't scored on that.
+
+        - val_loss, accuracy: over all questions
+        - ece: calibration error, how far "80% sure" is from being right 80% of the time (lower is better)
+        - per yes/no question: auroc_<name>, catch_<name> (share of yes caught when at most 1% of no is flagged),
+          and false_alarms_<name> (share of no flagged at a 0.5 cut-off); auroc, catch_rate, false_alarms average them
+        """
+        losses, correct, confidence, yes = [], [], [], {}
         order = sorted(range(len(items)), key=lambda i: len(parsed["state"][items[i].row]))
         for start in range(0, len(order), batch_size):
             chunk = [items[i] for i in order[start:start + batch_size]]
@@ -227,22 +233,53 @@ class DecisionLetters:
             valid, targets = targets["valid"], targets["targets"]
             logp = torch.log(probs.clamp_min(1e-9)).masked_fill(~valid, 0.0)
             losses += (-(targets * logp).sum(-1)).tolist()
-            correct += (probs.masked_fill(~valid, -1).argmax(-1) == targets.argmax(-1)).tolist()
+            picked = probs.masked_fill(~valid, -1)
+            correct += (picked.argmax(-1) == targets.argmax(-1)).tolist()
+            confidence += picked.max(-1).values.tolist()
             for it, p, t in zip(chunk, probs, targets):
                 if parsed["questions"][it.row][it.name]["type"] == "noul":
                     yes.setdefault(it.name, ([], []))
                     yes[it.name][0].append(float(p[0]))  # option 0 is "yes" in the question's own order
                     yes[it.name][1].append(bool(t[0] >= 0.5))
-        out = {"val_loss": float(np.mean(losses)), "accuracy": float(np.mean(correct))}
-        scores = {}
+        out = {"val_loss": float(np.mean(losses)), "accuracy": float(np.mean(correct)),
+               "ece": calibration_error(np.array(confidence), np.array(correct, dtype=bool)), "rows": len(items)}
+        per = {"auroc": [], "catch": [], "false_alarms": []}
         for name, (p, y) in yes.items():
-            value = auroc(np.array(p), np.array(y))
-            if value is not None:
-                scores[name] = value
-                out[f"auroc_{name}"] = value
-        if scores:
-            out["auroc"] = float(np.mean(list(scores.values())))
+            p, y = np.array(p), np.array(y)
+            value = auroc(p, y)
+            if value is None:
+                continue
+            caught = catch_rate(p, y, 0.01)
+            alarms = float((p[~y] >= 0.5).mean())
+            out[f"auroc_{name}"], out[f"catch_{name}"], out[f"false_alarms_{name}"] = value, caught, alarms
+            per["auroc"].append(value)
+            per["catch"].append(caught)
+            per["false_alarms"].append(alarms)
+        if per["auroc"]:
+            out["auroc"] = float(np.mean(per["auroc"]))
+            out["catch_rate"] = float(np.mean(per["catch"]))
+            out["false_alarms"] = float(np.mean(per["false_alarms"]))
         return out
+
+
+def catch_rate(scores: np.ndarray, labels: np.ndarray, false_alarm_rate: float) -> float:
+    """Share of positives scored above the cut-off that flags at most `false_alarm_rate` of the negatives."""
+    negatives = np.sort(scores[~labels])[::-1]
+    allowed = int(np.floor(false_alarm_rate * len(negatives)))  # how many negatives may be flagged
+    cutoff = negatives[allowed] if allowed < len(negatives) else -np.inf
+    return float((scores[labels] > cutoff).mean())
+
+
+def calibration_error(confidence: np.ndarray, correct: np.ndarray, bins: int = 10) -> float:
+    """Expected calibration error: the gap between how sure the model is and how often it's right, averaged over
+    10 confidence bins weighted by how many answers fall in each."""
+    edges = np.linspace(0, 1, bins + 1)
+    total = 0.0
+    for low, high in zip(edges[:-1], edges[1:]):
+        inside = (confidence > low) & (confidence <= high)
+        if inside.any():
+            total += inside.mean() * abs(correct[inside].mean() - confidence[inside].mean())
+    return float(total)
 
 
 # ---------------------------------------------------------------- language models

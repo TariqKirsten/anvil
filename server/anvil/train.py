@@ -3,11 +3,15 @@
     python -m anvil.train /data/runs/<id> [--resume]
 
 with HIP_VISIBLE_DEVICES set to the chosen card. It reads the run's config.json, trains, and reports through files:
-- status.json      what it's doing right now: state, stage, step of total, speed, ETA, memory, error
-- metrics.jsonl    one line per logged step (training loss) and per validation check
-- log.txt          everything it prints (the server writes this file from the process output)
-- checkpoints/     the trainable weights plus the optimizer's state, every N steps, to resume from
-- model/           the finished model: adapter/ and merged/ for LoRA, merged/ for full fine-tuning
+- status.json       what it's doing right now: state, stage, step of total, speed, ETA, memory, error
+- metrics.jsonl     one line per logged step (training loss), per validation check, and the final test
+- leaderboard.json  every check's score on the "pick best by" metric, and the best checkpoint so far (anvil.picking)
+- log.txt           everything it prints (the server writes this file from the process output)
+- checkpoints/      the trainable weights plus the optimizer's state: the best few, and the newest for Resume
+- model/            the finished model, built from the best checkpoint: adapter/ and merged/ for LoRA, merged/ otherwise
+
+Checks run here, pausing training briefly, unless the run has a judge (anvil.judge) on a spare GPU: then this process
+only saves checkpoints, and watches the leaderboard the judge fills to know when to stop early.
 
 Stop sends SIGTERM: the run saves a checkpoint after the current step and exits, so stopping loses at most one step.
 """
@@ -27,13 +31,16 @@ import time
 import traceback
 from pathlib import Path
 
+from . import picking
+
 if os.environ.get("ANVIL_SAFE_KERNELS") == "1":
     # The slow but plain paths, for models whose fast kernels misbehave. Must run before any model code is imported.
     sys.modules["fla"] = None
     sys.modules["causal_conv1d"] = None
 
 VAL_ROWS = 2000  # validation checks use at most this many rows, so they take seconds, not minutes
-KEEP_CHECKPOINTS = 2  # the newest ones; step 4 adds keeping the best
+TEST_ROWS = 5000  # the final test uses at most this many rows (about two minutes for a 2B decision model)
+JUDGE_SILENT_S = 90  # a judge that hasn't reported for this long is taken to be gone
 STOP = {"requested": False}
 
 
@@ -48,15 +55,15 @@ def write_json(path: Path, data: dict) -> None:
 
 
 class Reporter:
-    def __init__(self, run_dir: Path):
+    def __init__(self, run_dir: Path, status_path: Path | None = None):
         self.dir = run_dir
-        path = run_dir / "status.json"
-        self.status = json.loads(path.read_text()) if path.exists() else {}
+        self.path = status_path or run_dir / "status.json"
+        self.status = json.loads(self.path.read_text()) if self.path.exists() else {}
         self.metrics = (run_dir / "metrics.jsonl").open("a")
 
     def update(self, **fields) -> None:
         self.status.update(fields, updated=time.time())
-        write_json(self.dir / "status.json", self.status)
+        write_json(self.path, self.status)
 
     def metric(self, entry: dict) -> None:
         self.metrics.write(json.dumps(entry) + "\n")
@@ -75,7 +82,19 @@ def friendly(error: BaseException) -> str:
     return f"{error.__class__.__name__}: {error}"
 
 
-# ---------------------------------------------------------------- the model
+# ---------------------------------------------------------------- the model and the data
+
+def device_and_dtype(cfg: dict):
+    import torch
+
+    device = torch.device(os.environ.get("ANVIL_DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu"))
+    dtype = torch.bfloat16 if cfg["hyper"]["precision"] == "bf16" else torch.float16
+
+    def autocast():
+        return torch.autocast(device.type, dtype=dtype) if device.type == "cuda" else contextlib.nullcontext()
+
+    return device, dtype, autocast
+
 
 def load_model(cfg: dict, device, dtype, checkpoint: Path | None):
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -113,17 +132,63 @@ def load_model(cfg: dict, device, dtype, checkpoint: Path | None):
     return tok, model
 
 
+def load_weights(model, checkpoint: Path, cfg: dict, device, dtype):
+    """The model with a checkpoint's trainable weights: swapped in for LoRA, loaded afresh for full fine-tuning."""
+    if cfg["training_type"] == "lora":
+        from peft import set_peft_model_state_dict
+        from safetensors.torch import load_file
+
+        set_peft_model_state_dict(model, load_file(str(checkpoint / "adapter" / "adapter_model.safetensors"),
+                                                   device=str(device)))
+        return model
+    from transformers import AutoModelForCausalLM
+
+    fresh = AutoModelForCausalLM.from_pretrained(
+        str(checkpoint / "model"), dtype=dtype if device.type == "cuda" else None,
+        trust_remote_code=bool(cfg["model"].get("custom_code"))).to(device)
+    fresh.config.use_cache = False
+    return fresh
+
+
+def make_task(cfg: dict, tok):
+    from . import tasks
+
+    h = cfg["hyper"]
+    if cfg["train_as"] == "decision":
+        return tasks.DecisionLetters(tok, int(h["maxLength"]), int(h["seed"]))
+    return tasks.LanguageModel(tok, cfg["data"]["format"], int(h["maxLength"]))
+
+
+def read_split(cfg: dict, name: str, cap: int | None):
+    import pandas as pd
+
+    df = pd.read_parquet(Path(cfg["data"]["prepared"]) / f"{name}.parquet")
+    if cap and len(df) > cap:  # the same rows every time: the trainer and the judge must score the same sample
+        df = df.sample(cap, random_state=int(cfg["hyper"]["seed"])).reset_index(drop=True)
+    return df
+
+
 # ---------------------------------------------------------------- checkpoints
 
 def checkpoints(run_dir: Path) -> list[Path]:
     folder = run_dir / "checkpoints"
-    return sorted(p for p in folder.glob("step-*") if (p / "state.json").exists()) if folder.exists() else []
+    if not folder.exists():
+        return []
+    return sorted(p for p in folder.glob("step-*") if not p.name.endswith(".tmp") and (p / "state.json").exists())
+
+
+def step_of(path: Path) -> int:
+    return int(path.name.split("-")[1])
+
+
+def checkpoint_dir(run_dir: Path, step: int) -> Path:
+    return run_dir / "checkpoints" / f"step-{step:07d}"
 
 
 def save_checkpoint(run_dir: Path, model, tok, opt, sched, state: dict, lora: bool) -> Path:
     import torch
 
-    final = run_dir / "checkpoints" / f"step-{state['step']:07d}"
+    final = checkpoint_dir(run_dir, state["step"])
     tmp = final.with_name(final.name + ".tmp")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
@@ -137,49 +202,52 @@ def save_checkpoint(run_dir: Path, model, tok, opt, sched, state: dict, lora: bo
     write_json(tmp / "state.json", state)  # written last: a checkpoint without it is incomplete
     shutil.rmtree(final, ignore_errors=True)
     os.replace(tmp, final)
-    for old in checkpoints(run_dir)[:-KEEP_CHECKPOINTS]:
-        shutil.rmtree(old, ignore_errors=True)
     return final
+
+
+def prune(run_dir: Path, keep_steps: set[int]) -> None:
+    for path in checkpoints(run_dir):
+        if step_of(path) not in keep_steps:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def judge_alive(run_dir: Path) -> bool:
+    try:
+        status = json.loads((run_dir / "judge" / "status.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return status.get("state") not in ("done", "failed") and time.time() - status.get("updated", 0) < JUDGE_SILENT_S
 
 
 # ---------------------------------------------------------------- training
 
 def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
     import numpy as np
-    import pandas as pd
     import torch
 
     from . import tasks
 
-    h = cfg["hyper"]
+    h, ck = cfg["hyper"], cfg["checkpoints"]
     seed = int(h["seed"])
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    device = torch.device(os.environ.get("ANVIL_DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu"))
-    dtype = torch.bfloat16 if h["precision"] == "bf16" else torch.float16
-    amp = device.type == "cuda"
+    device, dtype, autocast = device_and_dtype(cfg)
+    lora = cfg["training_type"] == "lora"
+    pick_by = ck.get("pickBy", "val_loss")
+    keep_best, patience = int(ck.get("keepBest", 3)), int(ck.get("patience", 0))
+    judged_elsewhere = cfg.get("judge_gpu") is not None
 
-    def autocast():
-        return torch.autocast(device.type, dtype=dtype) if amp else contextlib.nullcontext()
-
-    report.update(stage="Reading the data")
-    prepared = Path(cfg["data"]["prepared"])
-    train_df = pd.read_parquet(prepared / "train.parquet")
-    val_df = pd.read_parquet(prepared / "validation.parquet")
-    if len(val_df) > VAL_ROWS:
-        val_df = val_df.sample(VAL_ROWS, random_state=seed).reset_index(drop=True)
+    report.update(stage="Reading the data", training_finished=False)
+    train_df = read_split(cfg, "train", None)
+    val_df = read_split(cfg, "validation", VAL_ROWS)
 
     resume_from = checkpoints(run_dir)[-1] if resume and checkpoints(run_dir) else None
     report.update(stage="Loading the model (downloading it first if needed)")
     tok, model = load_model(cfg, device, dtype, resume_from)
-    lora = cfg["training_type"] == "lora"
 
     report.update(stage="Preparing batches")
-    if cfg["train_as"] == "decision":
-        task = tasks.DecisionLetters(tok, int(h["maxLength"]), seed)
-    else:
-        task = tasks.LanguageModel(tok, cfg["data"]["format"], int(h["maxLength"]))
+    task = make_task(cfg, tok)
     items, parsed = task.items(train_df)
     val_items, val_parsed = task.items(val_df)
     lengths = task.lengths(items, parsed)
@@ -218,32 +286,43 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
     n_all = sum(p.numel() for p in model.parameters())
     print(f"{len(items):,} training items, {len(val_items):,} validation items; {total:,} steps "
           f"({steps_per_epoch:,} per epoch); training {n_trainable / 1e6:.1f}M of {n_all / 1e9:.2f}B parameters "
-          f"on {device}", flush=True)
+          f"on {device}; checks {'on the judge GPU' if judged_elsewhere else 'here'}", flush=True)
     report.update(state="running", stage="Training", step=step, total=total, epoch=epoch,
                   trainable_m=round(n_trainable / 1e6, 1), items=len(items))
 
-    def validate() -> dict:
+    board = picking.load(run_dir)
+
+    def check(at_step: int) -> dict:
+        """A validation check here, recorded on the leaderboard."""
+        nonlocal board
         report.update(stage="Checking on validation")
         model.eval()
         metrics = task.evaluate(model, val_items, val_parsed, max(1, batch_size * 2), autocast)
         model.train()
-        report.metric({"type": "eval", "step": step, **metrics})
-        report.update(stage="Training", last_eval={"step": step, **metrics})
+        report.metric({"type": "eval", "step": at_step, "by": "trainer", **metrics})
+        with picking.updating(run_dir) as board:
+            picking.record(board, at_step, metrics, pick_by)
+        report.update(stage="Training", last_eval={"step": at_step, **metrics}, best_step=board.get("best_step"))
         return metrics
 
     def checkpoint() -> None:
         report.update(stage="Saving a checkpoint")
         save_checkpoint(run_dir, model, tok, opt, sched,
                         {"step": step, "epoch": epoch, "batch_index": batch_index, "saved": time.time()}, lora)
+        if not judged_elsewhere:  # with a judge, the judge keeps the best and deletes the rest
+            prune(run_dir, picking.keep(board, keep_best, [step_of(p) for p in checkpoints(run_dir)]))
         report.update(stage="Training", checkpoints=[p.name for p in checkpoints(run_dir)])
 
-    every = int(cfg["checkpoints"]["every"])
+    def early_stop_reason() -> str | None:
+        return picking.stop_reason(picking.load(run_dir) if judged_elsewhere else board, patience)
+
+    every = int(ck["every"])
     log_every = max(1, min(50, total // 200))
     if STOP["requested"]:  # Stop pressed while the model was loading: nothing trained, nothing to save
         report.update(state="stopped", stage="Stopped", step=step, stopped=time.time())
         return
-    if step == 0:
-        validate()  # the score before any training, as the starting point of the chart
+    if step == 0 and not judged_elsewhere and 0 not in {e["step"] for e in board["entries"]}:
+        check(0)  # the score before any training, as the starting point of the chart
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
     model.train()
@@ -251,7 +330,7 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
     # Speed and ETA come from recent steps only: the first steps include one-time kernel compiling, and validation
     # pauses aren't training speed.
     window_start, window_step, step_rate = time.time(), step, None
-    finished = False
+    finished, early = step >= total, None
     while not finished:
         batches = tasks.length_grouped_batches(lengths, batch_size, random.Random(seed + epoch))
         for bi in range(batch_index, len(batches)):
@@ -291,8 +370,13 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
                 losses, tokens = [], 0
                 window_start, window_step = time.time(), step
             at_checkpoint = step % every == 0 or step == total
-            if at_checkpoint:
-                validate()
+            if at_checkpoint and judged_elsewhere and not judge_alive(run_dir):
+                # The judge crashed or hung: check here from now on, so checkpoints don't pile up unchecked and
+                # early stopping still works. finish() checks the ones it missed.
+                print("the judge stopped, so checks run here from now on", flush=True)
+                judged_elsewhere, board = False, picking.load(run_dir)
+            if at_checkpoint and not judged_elsewhere:
+                check(step)
             if at_checkpoint or STOP["requested"]:
                 checkpoint()
             if at_checkpoint:
@@ -301,18 +385,75 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
                 report.update(state="stopped", stage="Stopped", step=step, eta_s=None, stopped=time.time())
                 print(f"stopped at step {step}; resume continues from here", flush=True)
                 return
-            if step >= total:
+            early = early_stop_reason() if (at_checkpoint or judged_elsewhere) else None
+            if early or step >= total:
                 finished = True
                 break
         else:
             epoch += 1
             batch_index = 0
+    if early:
+        print(f"stopping early at step {step}: {early}", flush=True)
+        report.metric({"type": "early_stop", "step": step, "reason": early})
 
-    report.update(state="saving", stage="Saving the model", eta_s=None)
+    finish(cfg, run_dir, report, model, tok, task, step, early, board, device, dtype, autocast)
+
+
+def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, early: str | None, board: dict,
+           device, dtype, autocast) -> None:
+    """Training is over: make sure every checkpoint has been checked, pick the best, score it once on the test split,
+    and save it as the run's model."""
+    ck, h = cfg["checkpoints"], cfg["hyper"]
+    pick_by = ck.get("pickBy", "val_loss")
+    lora = cfg["training_type"] == "lora"
+    batch = max(1, int(h["batchSize"]) * 2)
+    report.update(training_finished=True, eta_s=None)
+
+    swapped = False
+    if cfg.get("judge_gpu") is not None:
+        report.update(stage="Waiting for the judge to check the last checkpoints")
+        while True:
+            board = picking.load(run_dir)
+            judged = {e["step"] for e in board["entries"]}
+            if all(step_of(p) in judged for p in checkpoints(run_dir)) or not judge_alive(run_dir):
+                break
+            time.sleep(2)
+    judged = {e["step"] for e in board["entries"]}
+    missing = [p for p in checkpoints(run_dir) if step_of(p) not in judged]
+    if missing:  # the judge is gone: check what it didn't, here
+        val_df = read_split(cfg, "validation", VAL_ROWS)
+        val_items, val_parsed = task.items(val_df)
+        for path in missing:
+            report.update(stage=f"Checking {path.name} on validation")
+            model = load_weights(model, path, cfg, device, dtype)
+            swapped = True
+            model.eval()
+            metrics = task.evaluate(model, val_items, val_parsed, batch, autocast)
+            report.metric({"type": "eval", "step": step_of(path), "by": "trainer", **metrics})
+            with picking.updating(run_dir) as board:
+                picking.record(board, step_of(path), metrics, pick_by)
+
+    best = board.get("best_step") or step
+    if (best != step or swapped) and checkpoint_dir(run_dir, best).exists():
+        report.update(stage=f"Loading the best checkpoint (step {best})")
+        model = load_weights(model, checkpoint_dir(run_dir, best), cfg, device, dtype)
+    prune(run_dir, picking.keep(board, int(ck.get("keepBest", 3)), [step_of(p) for p in checkpoints(run_dir)]))
+
+    report.update(stage="Final test on the test split")
+    test_df = read_split(cfg, "test", TEST_ROWS)
+    final_test = None
+    if len(test_df):
+        test_items, test_parsed = task.items(test_df)
+        model.eval()
+        final_test = {"step": best, **task.evaluate(model, test_items, test_parsed, batch, autocast)}
+        report.metric({"type": "test", **final_test})
+
+    report.update(state="saving", stage="Saving the model", final_test=final_test, best_step=best)
     out = run_dir / "model"
     shutil.rmtree(out, ignore_errors=True)
     about = {"train_as": cfg["train_as"], "method": cfg["method"], "format": cfg["data"]["format"],
-             "base": cfg["model"]["id"], "run": run_dir.name}
+             "base": cfg["model"]["id"], "run": run_dir.name, "picked_step": best, "picked_by": pick_by,
+             "final_test": final_test}
     if cfg["train_as"] == "decision":
         about["prompt"] = "state, then '\\n\\nQuestion: ...', options as 'A. ...' lines, then 'Answer:'; read the letters"
     if lora:
@@ -322,8 +463,9 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool) -> None:
     model.save_pretrained(out / "merged")
     tok.save_pretrained(out / "merged")
     write_json(out / "merged" / "anvil.json", about)
-    report.update(state="done", stage="Done", step=step, finished=time.time(), model=str(out))
-    print(f"saved to {out}", flush=True)
+    report.update(state="done", stage="Done", step=step, finished=time.time(), model=str(out), early_stop=early,
+                  checkpoints=[p.name for p in checkpoints(run_dir)])
+    print(f"saved the step-{best} checkpoint to {out}", flush=True)
 
 
 def main() -> None:
@@ -336,7 +478,7 @@ def main() -> None:
     report = Reporter(run_dir)
     signal.signal(signal.SIGTERM, _ask_to_stop)
     signal.signal(signal.SIGINT, _ask_to_stop)
-    report.update(state="loading", stage="Starting", pid=os.getpid(), error=None,
+    report.update(state="loading", stage="Starting", pid=os.getpid(), error=None, early_stop=None,
                   started=report.status.get("started") or time.time(), stopped=None)
     try:
         train(cfg, run_dir, report, args.resume)

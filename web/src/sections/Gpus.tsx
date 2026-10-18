@@ -1,5 +1,5 @@
-// The GPUs to train on. Works for any number of cards: the note under the cards is worked out from what you pick,
-// including where the judge runs (a spare card means no pauses) and the edge cases worth knowing about.
+// The GPUs to train on. Works for any number of cards: the note under the cards says what each picked card will do,
+// including where the checkpoint checks run (a spare card means no pauses), and the edge cases worth knowing about.
 
 import type { FormState, SectionProps } from "../form";
 import { gb } from "../format";
@@ -13,23 +13,33 @@ export function pickedGpus(form: FormState, list: GpuList | null): number[] {
   return form.gpus.filter((i) => gpus.some((g) => g.index === i));
 }
 
+// What a run does with the cards: the same choice the server makes (runs._choose_gpus). One card trains for now
+// (several at once is step 5), preferring one that doesn't drive a screen. Another free card, a ticked one first,
+// checks the checkpoints, so training never pauses for them.
+function plan(gpus: Gpu[], picked: Set<number>) {
+  const trains = gpus
+    .filter((g) => picked.has(g.index))
+    .sort((a, b) => Number(a.display) - Number(b.display) || a.index - b.index)[0];
+  const checks = gpus
+    .filter((g) => g !== trains && !g.busy)
+    .sort((a, b) => Number(!picked.has(a.index)) - Number(!picked.has(b.index)) || a.index - b.index)[0];
+  return { trains, checks };
+}
+
 function note(gpus: Gpu[], picked: Set<number>) {
-  const chosen = gpus.filter((g) => picked.has(g.index));
-  if (!chosen.length) return { main: "Pick at least one card.", bad: true, warnings: [] as string[], info: [] as string[] };
-  const spare = gpus.find((g) => !picked.has(g.index) && !g.busy);
-  const trains = chosen.length === 1 ? "1 card trains" : `${chosen.length} cards train at once`;
-  const main = spare
-    ? `${trains}. GPU ${spare.index} judges checkpoints, so training never pauses.`
-    : `${trains}. Checkpoint checks pause training briefly.`;
-  const warnings: string[] = [];
-  const sizes = [...new Set(chosen.map((g) => Math.round(g.total_gb)))];
-  if (sizes.length > 1)
-    warnings.push(`The cards differ in size. The ${Math.min(...sizes)} GB card limits the batch, and the slowest card sets the pace.`);
-  for (const g of chosen.filter((g) => g.busy))
-    warnings.push(`GPU ${g.index} is busy (${g.used_gb} GB in use), so training there may run out of memory.`);
-  const info = chosen
-    .filter((g) => g.display)
-    .map((g) => `GPU ${g.index} also drives your screen, so the desktop may stutter while it trains.`);
+  const { trains, checks } = plan(gpus, picked);
+  if (!trains) return { main: "Pick at least one card.", bad: true, warnings: [] as string[], info: [] as string[] };
+  const main = checks
+    ? `GPU ${trains.index} trains. GPU ${checks.index} checks the checkpoints, so training never pauses for them.`
+    : `GPU ${trains.index} trains, and pauses briefly at each checkpoint to check it.`;
+  const warnings = trains.busy
+    ? [`GPU ${trains.index} is busy (${trains.used_gb} GB in use), so training there may run out of memory.`]
+    : [];
+  const info: string[] = [];
+  if (checks && !picked.has(checks.index)) info.push(`GPU ${checks.index} isn't ticked, but it's free, so it does the checks.`);
+  if (picked.size > 1) info.push("For now a run trains on one card. Training on several at once arrives in step 5.");
+  if (trains.display) info.push(`GPU ${trains.index} also drives your screen, so the desktop may stutter while it trains.`);
+  if (checks?.display) info.push(`GPU ${checks.index} drives your screen, so the desktop may stutter during checks.`);
   return { main, bad: false, warnings, info };
 }
 
@@ -91,9 +101,6 @@ export function GpuSection({ form, update, list, error }: SectionProps & { list:
                 {w}
               </p>
             ))}
-            {picked.size > 1 && (
-              <p className="hint">For now a run trains on one card, preferring one that doesn't drive a screen. Several at once arrives in step 5.</p>
-            )}
             {n.info.map((i) => (
               <p key={i} className="hint">
                 {i}

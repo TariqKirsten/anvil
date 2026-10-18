@@ -19,7 +19,7 @@ export function CheckpointSection({ form, update, errors }: SectionProps) {
       <div className="grid-4">
         {num("every", "Save every (steps)", 50)}
         {num("keepBest", "Keep best", 1)}
-        {num("patience", "Stop after no gain for", 1, "checks in a row")}
+        {num("patience", "Stop after no gain for", 1, c.patience === 0 ? "never stops early" : "checks in a row")}
         <Field id="pickBy" label="Pick best by">
           <select id="pickBy" value={options.some((o) => o.value === c.pickBy) ? c.pickBy : options[0].value}
             onChange={(e) => setC({ pickBy: e.target.value })}>
@@ -32,7 +32,9 @@ export function CheckpointSection({ form, update, errors }: SectionProps) {
         </Field>
       </div>
       <p className="hint">
-        Each checkpoint is scored on tests the model never trained on, and the best one becomes the model.
+        Each checkpoint is scored on the validation set, and the best one becomes the model. With a spare GPU the
+        checks run there, so training doesn't pause for them. The test set is used once, at the end, on the best
+        checkpoint.
       </p>
     </Section>
   );

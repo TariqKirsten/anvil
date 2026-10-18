@@ -17,6 +17,24 @@ export const STATE_LABEL: Record<RunState, string> = {
   stopped: "Stopped",
 };
 
+// Validation numbers by the name the server gives them.
+export const METRIC_LABEL: Record<string, string> = {
+  auroc: "mean AUROC",
+  catch_rate: "catch rate",
+  ece: "calibration error",
+  accuracy: "accuracy",
+  val_loss: "validation loss",
+};
+
+// Shorter names for the list of runs, where space is tight.
+const SHORT_LABEL: Record<string, string> = {
+  auroc: "AUROC",
+  catch_rate: "catch rate",
+  ece: "calib. error",
+  accuracy: "accuracy",
+  val_loss: "val loss",
+};
+
 export function stateTone(state: RunState): "ok" | "warn" | "bad" | "accent" | "neutral" {
   if (state === "done") return "ok";
   if (state === "failed") return "bad";
@@ -66,7 +84,7 @@ export function Runs({ onLogout }: { onLogout: () => void }) {
         <div className="section run-list">
           {runs.map((r) => {
             const pct = r.total ? Math.min(100, Math.round((r.step / r.total) * 100)) : 0;
-            const score = r.last_eval?.auroc ?? r.last_eval?.val_loss;
+            const best = r.best && r.best.score !== null ? r.best : null;
             return (
               <a key={r.id} className="run-row" href={`#/runs/${r.id}`}>
                 <span className="run-main">
@@ -78,9 +96,13 @@ export function Runs({ onLogout }: { onLogout: () => void }) {
                 <span className="run-progress">
                   <span className="run-steps">
                     {r.total ? `${r.step.toLocaleString()} / ${r.total.toLocaleString()} steps` : r.stage}
-                    {score !== undefined && ` · ${r.last_eval?.auroc !== undefined ? "AUROC" : "val loss"} ${score.toFixed(3)}`}
                   </span>
                   <span className="bar"><span style={{ width: `${pct}%` }} /></span>
+                  {best && (
+                    <span className="run-steps">
+                      best {SHORT_LABEL[best.metric] ?? best.metric} {best.score!.toFixed(3)} · step {best.step.toLocaleString()}
+                    </span>
+                  )}
                 </span>
                 <Badge tone={stateTone(r.state)}>{STATE_LABEL[r.state] ?? r.state}</Badge>
               </a>

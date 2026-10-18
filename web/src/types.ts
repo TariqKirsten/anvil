@@ -141,6 +141,7 @@ export interface RunSummary {
   updated: number | null;
   last_eval: Record<string, number> | null;
   error: string | null;
+  best: Leaderboard["entries"][number] | null;
 }
 
 export interface RunStatus {
@@ -161,10 +162,14 @@ export interface RunStatus {
   items?: number;
   trainable_m?: number;
   last_eval?: Record<string, number>;
+  best_step?: number | null;
+  early_stop?: string | null;
+  final_test?: ({ step: number } & Record<string, number>) | null;
+  training_finished?: boolean;
 }
 
 export interface RunMetric {
-  type: "train" | "eval" | "resume";
+  type: "train" | "eval" | "resume" | "test" | "early_stop";
   step: number;
   [key: string]: number | string;
 }
@@ -178,8 +183,9 @@ export interface RunDetail {
     model: { id: string; params: number | null };
     data: { format: string; rows: Record<string, number> };
     gpu: number;
+    judge_gpu?: number | null;
     hyper: Record<string, number | string | boolean>;
-    checkpoints: { every: number; pickBy: string };
+    checkpoints: { every: number; keepBest: number; patience: number; pickBy: string };
     created: number;
   };
   status: RunStatus;
@@ -187,6 +193,24 @@ export interface RunDetail {
   log: string;
   checkpoints: string[];
   model: string | null;
+  leaderboard: Leaderboard;
+  judge: JudgeStatus | null;
+}
+
+// server/anvil/picking.py: one entry per validation check; best_step is the checkpoint that becomes the model.
+export interface Leaderboard {
+  entries: { step: number; score: number | null; metric: string; direction: "max" | "min" }[];
+  best_step: number | null;
+  since_best: number;
+}
+
+export interface JudgeStatus {
+  state: "starting" | "loading" | "checking" | "waiting" | "done" | "failed";
+  stage: string;
+  gpu: number | null;
+  step?: number | null;
+  error?: string | null;
+  updated?: number;
 }
 
 export interface HubDataset {

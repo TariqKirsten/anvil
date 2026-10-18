@@ -16,7 +16,7 @@ function tidy(v: number) {
   return v.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 }
 
-export function Chart({ series, empty }: { series: Series[]; empty: string }) {
+export function Chart({ series, empty, marker }: { series: Series[]; empty: string; marker?: { x: number; label: string } }) {
   const all = series.flatMap((s) => s.points);
   if (all.length === 0) return <p className="hint chart-empty">{empty}</p>;
   const xs = all.map((p) => p.x);
@@ -37,6 +37,13 @@ export function Chart({ series, empty }: { series: Series[]; empty: string }) {
             <text x={PAD.left - 6} y={sy(g) + 4} textAnchor="end" className="chart-label">{tidy(g)}</text>
           </g>
         ))}
+        {marker && marker.x >= x0 && marker.x <= x1 && (
+          <g className="chart-marker">
+            <line x1={sx(marker.x)} x2={sx(marker.x)} y1={PAD.top} y2={HEIGHT - PAD.bottom} />
+            <text x={sx(marker.x) + (sx(marker.x) > WIDTH - 80 ? -4 : 4)} y={PAD.top + 10}
+              textAnchor={sx(marker.x) > WIDTH - 80 ? "end" : "start"} className="chart-label">{marker.label}</text>
+          </g>
+        )}
         <text x={PAD.left} y={HEIGHT - 6} className="chart-label">step {x0}</text>
         <text x={WIDTH - PAD.right} y={HEIGHT - 6} textAnchor="end" className="chart-label">{x1}</text>
         {series.map((s) => (

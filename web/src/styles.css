@@ -1287,6 +1287,12 @@ h1 {
   background: var(--ok);
 }
 
+.chart-marker line {
+  stroke: var(--ok);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
 .chart-empty {
   padding: 40px 0;
   text-align: center;
@@ -1404,4 +1410,48 @@ h1 {
     grid-column: 1 / -1;
     grid-row: 2;
   }
+}
+
+.table th.picked {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.table td.picked {
+  background: var(--accent-bg);
+  color: var(--accent-text);
+}
+
+.table .best-row td {
+  font-weight: 600;
+}
+
+.table .badge {
+  margin-left: 6px;
+}
+
+.ckpt-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.ckpt {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.ckpt.best {
+  border-color: var(--ok);
+  background: var(--ok-bg);
+}
+
+.ckpt-score {
+  color: var(--text-2);
 }

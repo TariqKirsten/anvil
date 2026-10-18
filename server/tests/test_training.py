@@ -218,7 +218,8 @@ def run_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(runs.gpus, "list_gpus", lambda: {"gpus": [
         {"index": 0, "display": True, "busy": False}, {"index": 1, "display": False, "busy": False}]})
     spawned = []
-    monkeypatch.setattr(runs, "_spawn", lambda run_id, path, gpu, token, resume: spawned.append((run_id, gpu)))
+    monkeypatch.setattr(runs, "_spawn", lambda run_id, path, gpu, token, resume, judge_gpu=None:
+                        spawned.append((run_id, gpu, judge_gpu)))
 
     class Done:
         state, fingerprint = "done", "abc"
@@ -228,11 +229,37 @@ def run_settings(tmp_path, monkeypatch):
     return spawned
 
 
-def test_a_run_starts_on_the_card_without_a_screen(run_settings):
+def test_a_run_trains_on_the_card_without_a_screen_and_judges_on_the_other(run_settings):
     run_id = runs.create(FORM, {"train": {}}, None)
-    assert run_id.startswith("my-run-") and run_settings == [(run_id, 1)]
+    assert run_id.startswith("my-run-") and run_settings == [(run_id, 1, 0)]
     cfg = json.loads((config.settings.data / "runs" / run_id / "config.json").read_text())
-    assert cfg["gpu"] == 1 and cfg["data"]["prepared"].endswith("/abc")
+    assert cfg["gpu"] == 1 and cfg["judge_gpu"] == 0 and cfg["data"]["prepared"].endswith("/abc")
+
+
+def test_no_spare_card_means_checks_on_the_training_card(run_settings, monkeypatch):
+    monkeypatch.setattr(runs.gpus, "list_gpus", lambda: {"gpus": [
+        {"index": 0, "display": True, "busy": True}, {"index": 1, "display": False, "busy": False}]})
+    run_id = runs.create(FORM, {"train": {}}, None)
+    assert run_settings == [(run_id, 1, None)]
+
+
+def test_a_judge_still_checking_after_stop_keeps_its_card_and_serves_the_resume(run_settings, monkeypatch):
+    run_id = runs.create(FORM, {"train": {}}, None)
+    path = config.settings.data / "runs" / run_id
+    me = os.getpid()  # stands in for live processes
+    (path / "status.json").write_text(json.dumps({"state": "stopped", "step": 40}))
+    (path / "judge" / "status.json").parent.mkdir(exist_ok=True)
+    (path / "judge" / "status.json").write_text(json.dumps({"state": "checking", "gpu": 0, "pid": me,
+                                                            "updated": time.time()}))
+    (path / "prepared").mkdir()
+    (path / "prepared" / "train.parquet").write_text("")
+    cfg = json.loads((path / "config.json").read_text())
+    cfg["data"]["prepared"] = str(path / "prepared")
+    (path / "config.json").write_text(json.dumps(cfg))
+    assert runs.busy_gpus() == {0: run_id}  # the trainer stopped, but its judge is still at work on GPU 0
+    runs.resume(run_id, None)
+    assert run_settings[-1] == (run_id, 1, None)  # no second judge: the one still running carries on
+    assert json.loads((path / "config.json").read_text())["judge_gpu"] == 0
 
 
 @pytest.mark.parametrize("change, reason", [
@@ -258,3 +285,123 @@ def test_a_dead_process_shows_as_failed(run_settings):
     status = json.loads((path / "status.json").read_text())
     (path / "status.json").write_text(json.dumps({**status, "state": "running", "pid": 999_999_999}))
     assert runs.status(run_id)["state"] == "failed"
+
+
+# ---------------------------------------------------------------- the judge: picking, early stopping, a judge process
+
+def test_an_unimprovable_run_stops_early_and_keeps_its_best(tmp_path, tiny_model):
+    data = prepared(tmp_path, decision_rows(80), decision_rows(12, seed=1))
+    cfg = run_config(tiny_model, data, maxSteps=60, every=2, learningRate="1e-30", scheduler="constant")
+    cfg["checkpoints"].update(patience=1, keepBest=1, pickBy="auroc")
+    run_dir = make_run(tmp_path, cfg)
+    status = finish(start(run_dir), run_dir)
+    assert status["state"] == "done" and status["step"] == 4, status  # check at 2 is best, at 4 no better: stop
+    assert "didn't improve for 1 checks" in status["early_stop"]
+    assert status["best_step"] == 2 and status["final_test"]["step"] == 2
+    board = json.loads((run_dir / "leaderboard.json").read_text())
+    assert [e["step"] for e in board["entries"]] == [0, 2, 4] and board["best_step"] == 2
+    assert sorted(p.name for p in (run_dir / "checkpoints").iterdir()) == ["step-0000002", "step-0000004"]
+    assert json.loads((run_dir / "model" / "merged" / "anvil.json").read_text())["picked_step"] == 2
+
+
+def test_a_judge_process_checks_every_checkpoint(tmp_path, tiny_model):
+    data = prepared(tmp_path, decision_rows(40), decision_rows(12, seed=1))
+    cfg = run_config(tiny_model, data, maxSteps=6, every=2)
+    cfg["judge_gpu"] = 0
+    run_dir = make_run(tmp_path, cfg)
+    (run_dir / "judge").mkdir()
+    env = {**os.environ, "ANVIL_DEVICE": "cpu", "HIP_VISIBLE_DEVICES": "", "CUDA_VISIBLE_DEVICES": "",
+           "PYTHONPATH": str(SERVER)}
+    judge = subprocess.Popen([sys.executable, "-m", "anvil.judge", str(run_dir)], env=env,
+                             stdout=(run_dir / "judge" / "log.txt").open("ab"), stderr=subprocess.STDOUT)
+    status = finish(start(run_dir), run_dir)
+    assert judge.wait(timeout=240) == 0, (run_dir / "judge" / "log.txt").read_text()[-3000:]
+    assert status["state"] == "done"
+    by_judge = sorted(m["step"] for m in metrics(run_dir) if m["type"] == "eval" and m.get("by") == "judge")
+    assert by_judge == [0, 2, 4, 6]
+    assert not [m for m in metrics(run_dir) if m["type"] == "eval" and m.get("by") == "trainer"]
+    assert json.loads((run_dir / "judge" / "status.json").read_text())["state"] == "done"
+    assert status["final_test"]["step"] == json.loads((run_dir / "leaderboard.json").read_text())["best_step"]
+
+
+def test_picking_rules():
+    from anvil import picking
+
+    board = {"entries": [], "best_step": None, "since_best": 0}
+    for step, auroc in [(0, 0.9), (10, 0.7), (20, 0.8), (30, 0.75), (40, 0.79)]:
+        board = picking.record(board, step, {"auroc": auroc, "val_loss": 1.0}, "auroc")
+    assert board["best_step"] == 20 and board["since_best"] == 2  # step 0 scored highest but is never picked
+    assert picking.should_stop(board, 2) and not picking.should_stop(board, 3) and not picking.should_stop(board, 0)
+    assert [e["step"] for e in picking.ranked(board)] == [20, 40, 30, 10]
+    assert picking.keep(board, 2, [10, 20, 30, 40, 50]) == {20, 40, 50}  # best two, plus the newest and unchecked
+    assert picking.stop_reason(board, 2) == "Mean AUROC didn't improve for 2 checks in a row"
+    board = picking.record(board, 50, {"auroc": 0.85}, "auroc")  # a later, better check cancels the stop
+    assert board["best_step"] == 50 and picking.stop_reason(board, 2) is None
+    loss_board = {"entries": [], "best_step": None, "since_best": 0}
+    for step, loss in [(10, 0.5), (20, 0.4), (30, 0.45)]:
+        loss_board = picking.record(loss_board, step, {"val_loss": loss}, "val_loss")
+    assert loss_board["best_step"] == 20  # lower is better for losses
+    no_auroc = picking.record({"entries": [], "best_step": None, "since_best": 0}, 10, {"val_loss": 0.3}, "auroc")
+    assert no_auroc["entries"][0]["metric"] == "val_loss"  # falls back when the data has no yes/no questions
+
+
+def test_catch_rate_and_calibration():
+    scores = np.array([0.1, 0.2, 0.3, 0.95, 0.6, 0.7, 0.99])
+    labels = np.array([False, False, False, False, True, True, True])
+    assert tasks.catch_rate(scores, labels, 0.0) == pytest.approx(1 / 3)  # only 0.99 beats the highest "no" (0.95)
+    assert tasks.catch_rate(scores, labels, 0.25) == 1.0  # one "no" of four may be flagged: the cut-off drops to 0.3
+    perfect = tasks.calibration_error(np.array([0.9] * 10), np.array([True] * 9 + [False]))
+    assert perfect == pytest.approx(0.0, abs=1e-9)
+    overconfident = tasks.calibration_error(np.array([0.9] * 10), np.array([True] * 5 + [False] * 5))
+    assert overconfident == pytest.approx(0.4)
+
+
+def test_a_run_whose_judge_never_shows_up_checks_itself(tmp_path, tiny_model):
+    data = prepared(tmp_path, decision_rows(40), decision_rows(12, seed=1))
+    cfg = run_config(tiny_model, data, maxSteps=6, every=2)
+    cfg["judge_gpu"] = 0  # but no judge process: the trainer notices at the first checkpoint and takes over
+    run_dir = make_run(tmp_path, cfg)
+    status = finish(start(run_dir), run_dir)
+    assert status["state"] == "done"
+    assert sorted(m["step"] for m in metrics(run_dir) if m["type"] == "eval") == [2, 4, 6]
+    assert "the judge stopped, so checks run here" in (run_dir / "log.txt").read_text()
+    assert status["final_test"]["step"] == status["best_step"]
+
+
+def test_the_judge_stops_training_early(tmp_path, tiny_model):
+    data = prepared(tmp_path, decision_rows(80), decision_rows(12, seed=1))
+    # A learning rate too small to change anything: the first trained check is the best, the next one is no better.
+    cfg = run_config(tiny_model, data, maxSteps=20000, every=50, learningRate="1e-30", scheduler="constant")
+    cfg["checkpoints"].update(patience=1, keepBest=1)
+    cfg["judge_gpu"] = 0
+    run_dir = make_run(tmp_path, cfg)
+    (run_dir / "judge").mkdir()
+    env = {**os.environ, "ANVIL_DEVICE": "cpu", "HIP_VISIBLE_DEVICES": "", "CUDA_VISIBLE_DEVICES": "",
+           "PYTHONPATH": str(SERVER)}
+    judge = subprocess.Popen([sys.executable, "-m", "anvil.judge", str(run_dir)], env=env,
+                             stdout=(run_dir / "judge" / "log.txt").open("ab"), stderr=subprocess.STDOUT)
+    status = finish(start(run_dir), run_dir, timeout=400)
+    assert judge.wait(timeout=240) == 0, (run_dir / "judge" / "log.txt").read_text()[-3000:]
+    assert status["state"] == "done" and status["step"] < 20000, status
+    assert status["early_stop"] == "Mean AUROC didn't improve for 1 checks in a row" and status["best_step"] == 50
+    judged = {m["step"] for m in metrics(run_dir) if m["type"] == "eval"}
+    saved = {int(p.name[5:]) for p in (run_dir / "checkpoints").iterdir()}
+    assert saved <= judged and 50 in saved  # everything left was checked; the best is still there
+    assert len(saved) <= 2  # the best, plus the newest for Resume
+
+
+def test_the_trainer_and_the_judge_never_overwrite_each_others_checks(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from anvil import picking
+
+    def add(step):
+        with picking.updating(tmp_path) as board:
+            time.sleep(0.01)  # widen the window a lost update would need
+            picking.record(board, step, {"val_loss": 1.0 / step}, "val_loss")
+
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(add, range(1, 41)))
+    board = picking.load(tmp_path)
+    assert [e["step"] for e in board["entries"]] == list(range(1, 41))
+    assert board["best_step"] == 40

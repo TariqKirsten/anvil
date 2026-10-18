@@ -50,16 +50,16 @@ export interface SectionProps {
   errors: Errors;
 }
 
+// The same names as server/anvil/picking.py.
 export const PICK_BY: Record<TrainAs, { value: string; label: string }[]> = {
   decision: [
     { value: "auroc", label: "Mean AUROC" },
     { value: "catch_rate", label: "Catch rate at 1% false alarms" },
-    { value: "calibration", label: "Calibration" },
-  ],
-  lm: [
+    { value: "calibration", label: "Calibration (lowest error)" },
+    { value: "accuracy", label: "Accuracy" },
     { value: "val_loss", label: "Validation loss" },
-    { value: "benchmark", label: "Benchmark score" },
   ],
+  lm: [{ value: "val_loss", label: "Validation loss" }],
 };
 
 export const DEFAULTS: FormState = {
@@ -176,7 +176,7 @@ export function validate(form: FormState): Errors {
   const c = form.checkpoints;
   if (!wholeNumber(c.every, 10, 1_000_000)) errors.every = "Use at least 10 steps.";
   if (!wholeNumber(c.keepBest, 1, 100)) errors.keepBest = "Use 1 to 100.";
-  if (!wholeNumber(c.patience, 1, 1000)) errors.patience = "Use at least 1.";
+  if (!wholeNumber(c.patience, 0, 1000)) errors.patience = "Use 0 (never stop early) or a whole number.";
   if (!form.name.trim()) errors.name = "Give the run a name.";
   return errors;
 }
