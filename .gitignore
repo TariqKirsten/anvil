@@ -1,0 +1,7 @@
+.env
+compose.override.yaml
+__pycache__/
+*.pyc
+.pytest_cache/
+web/node_modules/
+web/dist/

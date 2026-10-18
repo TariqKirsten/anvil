@@ -1,0 +1,66 @@
+import { PICK_BY, type FormState, type SectionProps } from "../form";
+import { Field, Section, Segmented } from "../ui";
+
+const METHOD_HINTS = {
+  clef: "A small new network scores every option, for all questions in one pass.",
+  letters: "The model picks a letter for each option, one question per pass.",
+  chat: "Conversations, trained through the model's chat template.",
+  text: "Raw text, for continued pre-training or plain completion.",
+};
+
+export function TrainAs({ form, update }: SectionProps) {
+  const decision = form.trainAs === "decision";
+  return (
+    <Section title="Train as">
+      <Segmented
+        label="Train as"
+        value={form.trainAs}
+        options={[
+          { value: "lm", label: "Language model" },
+          { value: "decision", label: "Decision model" },
+        ]}
+        onChange={(trainAs) =>
+          update((f) => ({ ...f, trainAs, checkpoints: { ...f.checkpoints, pickBy: PICK_BY[trainAs][0].value } }))
+        }
+      />
+      <div className="row">
+        <div className="field">
+          <span className="label">{decision ? "Method" : "Data format"}</span>
+          {decision ? (
+            <Segmented
+              label="Method"
+              value={form.decisionMethod}
+              options={[
+                { value: "clef", label: "Clef head" },
+                { value: "letters", label: "Letters" },
+              ]}
+              onChange={(decisionMethod) => update((f) => ({ ...f, decisionMethod }))}
+            />
+          ) : (
+            <Segmented
+              label="Data format"
+              value={form.lmFormat}
+              options={[
+                { value: "chat", label: "Chat" },
+                { value: "text", label: "Plain text" },
+              ]}
+              onChange={(lmFormat) => update((f) => ({ ...f, lmFormat }))}
+            />
+          )}
+          <p className="hint">{METHOD_HINTS[decision ? form.decisionMethod : form.lmFormat]}</p>
+        </div>
+        <Field id="training-type" label="Training type">
+          <select
+            id="training-type"
+            value={form.trainingType}
+            onChange={(e) => update((f) => ({ ...f, trainingType: e.target.value as FormState["trainingType"] }))}
+          >
+            <option value="lora">LoRA</option>
+            <option value="qlora">QLoRA (4-bit)</option>
+            <option value="full">Full</option>
+          </select>
+        </Field>
+      </div>
+    </Section>
+  );
+}

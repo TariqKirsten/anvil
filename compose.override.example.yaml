@@ -1,0 +1,10 @@
+# Extra folders for one machine. Copy to compose.override.yaml (not committed); compose reads it automatically.
+# The mount points must exist inside the folders above first (mkdir -p), or Docker creates them owned by root.
+services:
+  dev: &extra
+    volumes:
+      # Reuse a Hugging Face cache you already have, so nothing gets downloaded twice.
+      - /path/to/existing/huggingface/hub:/hf-cache/hub
+      # Make models trained elsewhere pickable, read-only.
+      - /path/to/other/models:/models/other:ro
+  app: *extra

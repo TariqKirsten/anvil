@@ -1,0 +1,60 @@
+# anvil in Docker. Settings come from .env (copy .env.example first).
+#   docker compose up dev       development: live reload, http://<this machine>:5173
+#   docker compose up -d app    the finished app, http://<this machine>:8420
+#
+# Inside the container everything lives at fixed paths, and .env says which host folders they are:
+#   /data       anvil's own data: accounts, runs, uploaded datasets          (ANVIL_DATA)
+#   /hf-cache   the Hugging Face cache: downloaded models and datasets       (ANVIL_HF_CACHE)
+#   /models     local models you want to pick from                          (ANVIL_MODELS)
+# The folders must exist before the first start. Docker would otherwise create them owned by root.
+# Machine-specific extra folders go in compose.override.yaml (see compose.override.example.yaml).
+
+x-anvil: &anvil
+  image: anvil:dev
+  build:
+    context: docker
+    args:
+      ANVIL_UID: ${ANVIL_UID:-1000}
+      ANVIL_GID: ${ANVIL_GID:-1000}
+  # The GPUs: /dev/kfd and the render nodes are what ROCm needs (no display access).
+  devices: [/dev/kfd, /dev/dri]
+  ipc: host
+  security_opt: [seccomp=unconfined]
+  user: "${ANVIL_UID:-1000}:${ANVIL_GID:-1000}"
+  env_file: .env
+  environment:
+    ANVIL_DATA: /data
+    ANVIL_MODEL_ROOTS: /models:/hf-cache/hub
+    HF_HOME: /hf-cache
+    HF_HUB_CACHE: /hf-cache/hub
+    HOME: /data/home
+  volumes:
+    - type: bind
+      source: .
+      target: /workspace
+    - type: bind
+      source: ${ANVIL_DATA:?Set ANVIL_DATA in .env}
+      target: /data
+      bind: { create_host_path: false }
+    - type: bind
+      source: ${ANVIL_HF_CACHE:?Set ANVIL_HF_CACHE in .env}
+      target: /hf-cache
+      bind: { create_host_path: false }
+    - type: bind
+      source: ${ANVIL_MODELS:?Set ANVIL_MODELS in .env}
+      target: /models
+      bind: { create_host_path: false }
+  working_dir: /workspace
+  init: true
+
+services:
+  dev:
+    <<: *anvil
+    command: docker/dev.sh
+    ports: ["5173:5173"]
+
+  app:
+    <<: *anvil
+    command: docker/app.sh
+    ports: ["8420:8420"]
+    restart: unless-stopped

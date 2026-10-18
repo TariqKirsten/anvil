@@ -1,0 +1,17 @@
+[project]
+name = "anvil"
+version = "0.1.0"
+description = "Fine-tune language models and decision models from one screen."
+requires-python = ">=3.12"
+# Installed in the Docker image (docker/Dockerfile), next to the image's ROCm build of PyTorch.
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "huggingface_hub>=0.26",
+    "transformers>=5.15",
+    "safetensors",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
