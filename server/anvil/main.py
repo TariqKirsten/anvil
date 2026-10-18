@@ -14,7 +14,7 @@ from fastapi.requests import Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from . import accounts, auth, config, datasets, folders, gpus, models_check
+from . import accounts, auth, config, datasets, folders, gpus, models_check, runs
 
 REPO_ID = re.compile(r"^[\w.-]+/[\w.-]+$")
 
@@ -301,6 +301,58 @@ def hub_dataset_splits(request: Request, repo: str, config: str | None = None) -
         return {"splits": datasets.hub_splits(repo, config, hf_token(request))}
     except Exception as exc:
         raise _hub_failure(exc) from exc
+
+
+# ---------------------------------------------------------------- runs
+
+class RunBody(BaseModel):
+    form: dict
+    prepare: dict
+
+
+@app.post("/api/runs")
+def start_run(body: RunBody, request: Request) -> dict:
+    try:
+        return {"id": runs.create(body.form, body.prepare, hf_token(request))}
+    except (KeyError, TypeError) as exc:
+        raise HTTPException(400, f"The run settings are incomplete ({exc}). Reload the page and try again.") from exc
+    except Exception as exc:
+        raise _data_failure(exc) from exc
+
+
+@app.get("/api/runs")
+def list_runs() -> dict:
+    return {"runs": runs.list_runs()}
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: str) -> dict:
+    try:
+        return runs.detail(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/runs/{run_id}/stop")
+def stop_run(run_id: str) -> dict:
+    try:
+        runs.stop(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (ValueError, ProcessLookupError) as exc:
+        raise HTTPException(409, str(exc) or "This run isn't running.") from exc
+    return {"ok": True}
+
+
+@app.post("/api/runs/{run_id}/resume")
+def resume_run(run_id: str, request: Request) -> dict:
+    try:
+        runs.resume(run_id, hf_token(request))
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True}
 
 
 @app.get("/api/{rest:path}")

@@ -60,6 +60,25 @@ validation or test rows that share an input with train, and cuts whatever split 
 share an input stay on one side of the split. The result is cached: preparing the same data with the same settings
 again is instant.
 
+## Training
+
+**Start training** checks the whole form, then starts a separate trainer process on one GPU (one that doesn't drive a
+screen, if you picked several). The run gets its own page (Runs, top left) with progress, speed, time left, GPU
+memory, the loss and validation charts, a table of every validation check, the checkpoints and the log.
+
+- **Decision models** train the letters way: each question lists its options as A, B, C… and the model's scores for
+  the letters are its answer. Option order is shuffled per row so no letter is favoured; validation asks every question
+  in both orders and averages. Validation reports loss, accuracy, and AUROC per yes/no question.
+- **Language models** learn chat (only the assistant's replies), prompt and completion (only the completion), or plain
+  text.
+- A validation check runs before training and at every checkpoint. Checkpoints keep the trainable weights and the
+  optimizer, so **Stop** loses at most one step and **Resume** continues exactly where it stopped, after a crash too.
+- The finished model is in the run's folder: `model/adapter` and `model/merged` (for LoRA), or `model/merged`.
+
+The image compiles `causal_conv1d` for your GPU (`ANVIL_GPU_ARCH` in `.env`) and includes flash-linear-attention, the
+fast kernels for linear-attention models such as Qwen3.5. On an R9700 that makes Qwen3.5 training about 22% faster.
+`ANVIL_SAFE_KERNELS=1` switches both off if a model misbehaves.
+
 ## Accounts and Hugging Face
 
 - anvil starts with one account, `admin`. Change its password in Settings (the gear, top right).
@@ -73,9 +92,10 @@ again is instant.
 | Path | What |
 |---|---|
 | `docker/` | The image (`Dockerfile`), plus the scripts the containers run |
-| `server/anvil/` | The Python server: accounts and login, GPUs, the Hugging Face search, model checks, datasets |
+| `server/anvil/` | The Python server: accounts and login, GPUs, the Hugging Face search, model checks, datasets, runs |
+| `server/anvil/train.py` | The trainer process; `tasks.py` holds what each kind of model learns and how it's scored |
 | `server/tests/` | `docker compose exec -w /workspace/server dev python -m pytest` |
-| `web/src/` | The React screen: `Finetune.tsx`, `Settings.tsx`, and one file per section in `sections/` |
+| `web/src/` | The React screen: `Finetune.tsx`, `Runs.tsx`, `RunPage.tsx`, `Settings.tsx`, sections in `sections/` |
 
 ## Status
 
@@ -84,7 +104,8 @@ Built in steps:
 1. **The screen** (done): your real GPUs, Hugging Face search, local model folders and their checks, the full form,
    accounts and settings.
 2. **Data** (done): choosing datasets (this machine, upload, Hugging Face), checking rows, duplicate removal, splits.
-3. Training on one GPU, with checkpoints and live progress.
+3. **Training** (done): one GPU, decision models (letters) and language models, checkpoints, Stop and Resume, a live
+   run page.
 4. The judge: score checkpoints, keep the best, stop early.
 5. Training on several GPUs at once.
 6. The Clef decision head.

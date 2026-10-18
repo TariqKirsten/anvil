@@ -61,11 +61,12 @@ export function HyperSection({ form, update, errors }: SectionProps) {
             </select>
           </Field>
           {lora && num("loraAlpha", "LoRA alpha", 1, "usually 2 × rank")}
+          {num("maxSteps", "Max steps", 1, "0 = all epochs; set it for quick test runs")}
         </div>
       ) : (
         <p className="hint">
           Warmup {h.warmupPercent}% · {h.scheduler} · weight decay {h.weightDecay} · max length {h.maxLength} ·{" "}
-          {h.precision} · seed {h.seed}
+          {h.precision} · seed {h.seed}{h.maxSteps ? ` · stops after ${h.maxSteps} steps` : ""}
         </p>
       )}
     </Section>

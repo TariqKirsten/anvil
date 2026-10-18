@@ -38,6 +38,7 @@ export interface FormState {
     seed: number;
     precision: "bf16" | "fp16";
     gradCheckpointing: boolean;
+    maxSteps: number;
   };
   checkpoints: { every: number; keepBest: number; patience: number; pickBy: string };
 }
@@ -65,7 +66,7 @@ export const DEFAULTS: FormState = {
   name: "new-run",
   trainAs: "decision",
   lmFormat: "chat",
-  decisionMethod: "clef",
+  decisionMethod: "letters", // the Clef head arrives in step 6
   trainingType: "lora",
   model: { source: "hub", repo: null, folder: "" },
   gpus: null,
@@ -93,6 +94,7 @@ export const DEFAULTS: FormState = {
     seed: 3407,
     precision: "bf16",
     gradCheckpointing: true,
+    maxSteps: 0,
   },
   checkpoints: { every: 500, keepBest: 3, patience: 3, pickBy: "auroc" },
 };
@@ -167,6 +169,7 @@ export function validate(form: FormState): Errors {
   if (!wholeNumber(h.gradAccum, 1, 1024)) errors.gradAccum = "Use a whole number of at least 1.";
   if (!wholeNumber(h.maxLength, 16, 1_000_000)) errors.maxLength = "Use at least 16 tokens.";
   if (!wholeNumber(h.seed, 0, 2 ** 31 - 1)) errors.seed = "Use a whole number of 0 or more.";
+  if (!wholeNumber(h.maxSteps, 0, 100_000_000)) errors.maxSteps = "Use 0 (no limit) or a whole number of steps.";
   const d = form.data;
   if (!(d.valPercent >= 0 && d.valPercent <= 40)) errors.valPercent = "Use 0 to 40%.";
   if (!(d.testPercent >= 0 && d.testPercent <= 40)) errors.testPercent = "Use 0 to 40%.";

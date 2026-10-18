@@ -210,5 +210,13 @@ def test_prepare_job_runs_then_is_cached(data_settings):
     assert again["state"] == "done" and again["report"] == job["report"]
 
 
+def test_the_fingerprint_ignores_how_numbers_are_written():
+    sources = {"train": {"kind": "file", "path": "/x", "size": 1, "mtime": 2}}
+    a = datasets.fingerprint({"val_percent": 5, "test_percent": 5, "seed": 3407}, sources)
+    b = datasets.fingerprint({"val_percent": 5.0, "test_percent": 5.0, "seed": 3407.0}, sources)
+    assert a == b
+    assert a != datasets.fingerprint({"val_percent": 10, "test_percent": 5, "seed": 3407}, sources)
+
+
 def test_normalize_ignores_case_and_spacing():
     assert normalize("  Hello\n  World ") == "hello world"

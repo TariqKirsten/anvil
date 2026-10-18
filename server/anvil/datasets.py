@@ -366,10 +366,15 @@ def split_groups(groups: list, rows: np.ndarray, val_fraction: float, test_fract
 
 # ---------------------------------------------------------------- preparing a dataset
 
+def options(request: dict) -> dict:
+    """The settings that change the result, with fixed types: 5 and 5.0 must give the same fingerprint."""
+    return {"dedupe": bool(request.get("dedupe", True)), "near_copies": bool(request.get("near_copies", True)),
+            "val_percent": float(request.get("val_percent", 5)), "test_percent": float(request.get("test_percent", 5)),
+            "keep_together": str(request.get("keep_together", "input")), "seed": int(request.get("seed", 3407))}
+
+
 def fingerprint(request: dict, identities: dict) -> str:
-    keep = {k: request.get(k) for k in ("dedupe", "near_copies", "val_percent", "test_percent", "keep_together",
-                                        "seed")}
-    blob = _canonical({"version": VERSION, "sources": identities, "options": keep})
+    blob = _canonical({"version": VERSION, "sources": identities, "options": options(request)})
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
@@ -455,6 +460,8 @@ def prepare(request: dict, token: str | None, out_dir: Path, progress: Progress 
         report["rows"][name] = int(len(rows))
     report["given"] = {name: name in parsed for name in ("validation", "test")}
     report["seconds"] = round(time.time() - started, 1)
+    (out_dir / "request.json").write_text(json.dumps(
+        {"sources": {n: request.get(n) for n in SPLITS}, "options": options(request)}, indent=1))
     (out_dir / "report.json").write_text(json.dumps(report, indent=1))
     return report
 

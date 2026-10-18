@@ -122,6 +122,73 @@ export interface PrepareJob {
   error: string | null;
 }
 
+// ---- runs
+
+export type RunState = "starting" | "loading" | "running" | "saving" | "done" | "failed" | "stopped";
+
+export interface RunSummary {
+  id: string;
+  name: string;
+  train_as: "lm" | "decision";
+  method: string;
+  model: string;
+  gpu: number;
+  created: number;
+  state: RunState;
+  stage: string;
+  step: number;
+  total: number | null;
+  updated: number | null;
+  last_eval: Record<string, number> | null;
+  error: string | null;
+}
+
+export interface RunStatus {
+  state: RunState;
+  stage: string;
+  step: number;
+  total?: number;
+  epoch?: number;
+  loss?: number;
+  tokens_per_s?: number;
+  eta_s?: number | null;
+  peak_mem_gb?: number | null;
+  skipped?: number;
+  started?: number;
+  finished?: number;
+  stopped?: number | null;
+  error?: string | null;
+  items?: number;
+  trainable_m?: number;
+  last_eval?: Record<string, number>;
+}
+
+export interface RunMetric {
+  type: "train" | "eval" | "resume";
+  step: number;
+  [key: string]: number | string;
+}
+
+export interface RunDetail {
+  config: {
+    name: string;
+    train_as: "lm" | "decision";
+    method: string;
+    training_type: string;
+    model: { id: string; params: number | null };
+    data: { format: string; rows: Record<string, number> };
+    gpu: number;
+    hyper: Record<string, number | string | boolean>;
+    checkpoints: { every: number; pickBy: string };
+    created: number;
+  };
+  status: RunStatus;
+  metrics: RunMetric[];
+  log: string;
+  checkpoints: string[];
+  model: string | null;
+}
+
 export interface HubDataset {
   id: string;
   downloads: number;

@@ -91,6 +91,9 @@ export function GpuSection({ form, update, list, error }: SectionProps & { list:
                 {w}
               </p>
             ))}
+            {picked.size > 1 && (
+              <p className="hint">For now a run trains on one card, preferring one that doesn't drive a screen. Several at once arrives in step 5.</p>
+            )}
             {n.info.map((i) => (
               <p key={i} className="hint">
                 {i}

@@ -19,7 +19,23 @@ RUN ln -sf /usr/bin/python3 /usr/local/bin/python \
         "fastapi>=0.115" "uvicorn[standard]>=0.30" "huggingface_hub>=0.26" \
         "transformers>=5.15" peft datasets pandas pyarrow safetensors datasketch \
         pytest httpx \
+ && python3 -m pip install --no-cache-dir --no-deps flash-linear-attention fla-core einops \
  && python3 -c "import torch; assert 'rocm' in torch.__version__, torch.__version__; print(torch.__version__)"
+# flash-linear-attention: fast kernels for linear-attention models such as Qwen3.5. --no-deps so pip never swaps in a
+# non-ROCm triton. On ROCm 10.1 they trained without faults; ANVIL_SAFE_KERNELS=1 switches them off if a model misbehaves.
+
+# causal-conv1d: the fast kernel for the short convolutions in linear-attention layers, compiled for your card
+# (GPU_ARCH; 2.6-7x faster than PyTorch's plain path on an R9700). Its build script asks for C++17, but PyTorch 2.14's
+# headers need C++20, hence the sed. The source is pinned by checksum. Takes about 4 minutes.
+ARG GPU_ARCH=gfx1201
+RUN set -eux; cd /tmp; \
+    f=causal_conv1d-1.7.0.tar.gz; \
+    curl -fsSLO "https://files.pythonhosted.org/packages/f4/d1/eba27735f31bd5527d39a3c7f693e6ded7b844cab275db719a15ad37b6cd/$f"; \
+    echo "3202758494eaa7b597ce1c282dfa188889506bfcb92cad3c407d26736bfcd32b  $f" | sha256sum -c -; \
+    tar xzf "$f"; cd causal_conv1d-1.7.0; sed -i 's/c++17/c++20/g' setup.py; \
+    CAUSAL_CONV1D_FORCE_BUILD=TRUE HIP_ARCHITECTURES="$GPU_ARCH" MAX_JOBS=8 \
+        python3 -m pip install --no-cache-dir --no-build-isolation --no-deps .; \
+    cd /tmp; rm -rf causal_conv1d-1.7.0 "$f"; python3 -c "import causal_conv1d"
 
 ENV PYTHONUNBUFFERED=1 \
     TOKENIZERS_PARALLELISM=false \

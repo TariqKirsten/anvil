@@ -3,7 +3,7 @@
 import { IconPlayerPlay } from "@tabler/icons-react";
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import { loadForm, saveForm, validate, type FormState } from "./form";
+import { loadForm, prepareRequest, saveForm, validate, type FormState } from "./form";
 import { CheckpointSection } from "./sections/Checkpoints";
 import { DataSection } from "./sections/Data";
 import { GpuSection, pickedGpus } from "./sections/Gpus";
@@ -20,6 +20,7 @@ export function Finetune({ onLogout }: { onLogout: () => void }) {
   const [gpuError, setGpuError] = useState<string | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [dataReady, setDataReady] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [outcome, setOutcome] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => saveForm(form), [form]);
@@ -50,7 +51,7 @@ export function Finetune({ onLogout }: { onLogout: () => void }) {
   };
   const props = { form, update, errors };
 
-  function start() {
+  async function start() {
     const chosenModel = form.model.source === "hub" ? form.model.repo : form.model.folder.trim();
     const problem = !gpus?.gpus.length
       ? "There's no GPU to train on."
@@ -67,7 +68,19 @@ export function Finetune({ onLogout }: { onLogout: () => void }) {
                 : !dataReady
                   ? "Prepare the data first (the button in the Data section)."
                   : null;
-    setOutcome(problem ? { ok: false, text: problem } : { ok: true, text: "Everything checks out. Training arrives in step 3." });
+    if (problem) {
+      setOutcome({ ok: false, text: problem });
+      return;
+    }
+    setStarting(true);
+    try {
+      const run = await api<{ id: string }>("/api/runs", { json: { form, prepare: prepareRequest(form) } });
+      window.location.hash = `#/runs/${run.id}`;
+    } catch (e) {
+      setOutcome({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setStarting(false);
+    }
   }
 
   const found = gpus?.gpus.length ?? 0;
@@ -107,7 +120,7 @@ export function Finetune({ onLogout }: { onLogout: () => void }) {
           </p>
         )}
         <button type="button" className="primary" onClick={start}>
-          <IconPlayerPlay size={16} aria-hidden /> Start training
+          <IconPlayerPlay size={16} aria-hidden /> {starting ? "Starting…" : "Start training"}
         </button>
       </footer>
     </div>

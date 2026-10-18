@@ -929,7 +929,8 @@ a.brand {
   background: var(--surface-2);
 }
 
-.bar > div {
+.bar > * {
+  display: block;
   height: 100%;
   border-radius: 999px;
   background: var(--accent);
@@ -1028,6 +1029,316 @@ a.brand {
   gap: 6px;
 }
 
+/* ---- pages, runs */
+
+.nav {
+  display: flex;
+  gap: 4px;
+}
+
+.nav a {
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  color: var(--text-2);
+  font-size: 13.5px;
+  text-decoration: none;
+}
+
+.nav a:hover {
+  background: var(--surface-2);
+}
+
+.nav a.on {
+  background: var(--surface-2);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: inherit;
+  text-decoration: none;
+}
+
+.button-link:hover {
+  background: var(--surface-2);
+}
+
+.empty {
+  color: var(--text-2);
+}
+
+.run-list {
+  padding: 4px 0;
+}
+
+.run-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px auto;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  color: inherit;
+  text-decoration: none;
+}
+
+.run-row:last-child {
+  border-bottom: none;
+}
+
+.run-row:hover {
+  background: var(--surface-2);
+}
+
+.run-main,
+.run-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.run-title {
+  font-weight: 500;
+}
+
+.run-meta,
+.run-steps {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-progress .bar {
+  margin-top: 0;
+}
+
+.run-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.run-head .hint {
+  margin-top: 4px;
+}
+
+.run-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.run-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 16px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.bar.big {
+  height: 8px;
+  margin-top: 0;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 10px;
+  margin: 14px 0 10px;
+}
+
+.stats > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.stat-label {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.stat-value {
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.error-box {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--bad-bg);
+  color: var(--bad);
+  font-size: 13px;
+}
+
+.chart-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 0 16px;
+}
+
+.chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.chart-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.chart-label {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+.chart-series polyline {
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.chart-accent polyline {
+  stroke: var(--accent);
+}
+
+.chart-accent circle {
+  fill: var(--accent);
+}
+
+.chart-ok polyline {
+  stroke: var(--ok);
+}
+
+.chart-ok circle {
+  fill: var(--ok);
+}
+
+.chart-warn polyline {
+  stroke: var(--warn);
+}
+
+.chart-muted polyline {
+  stroke: var(--border-strong);
+  stroke-width: 1.25;
+}
+
+.chart-key.chart-muted::before {
+  background: var(--border-strong);
+}
+
+.chart-legend {
+  display: flex;
+  gap: 14px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.chart-key::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 3px;
+  margin-right: 6px;
+  vertical-align: middle;
+  border-radius: 2px;
+}
+
+.chart-key.chart-accent::before {
+  background: var(--accent);
+}
+
+.chart-key.chart-ok::before {
+  background: var(--ok);
+}
+
+.chart-empty {
+  padding: 40px 0;
+  text-align: center;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.table th,
+.table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.table th:first-child,
+.table td:first-child {
+  text-align: left;
+}
+
+.table th {
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+.log-box {
+  padding: 14px 20px;
+}
+
+.log-box summary {
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.log-box pre {
+  max-height: 340px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ---- login */
 
 .center {
@@ -1083,5 +1394,14 @@ a.brand {
 
   .panel-label {
     width: 100%;
+  }
+
+  .run-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .run-progress {
+    grid-column: 1 / -1;
+    grid-row: 2;
   }
 }

@@ -17,6 +17,7 @@ x-anvil: &anvil
     args:
       ANVIL_UID: ${ANVIL_UID:-1000}
       ANVIL_GID: ${ANVIL_GID:-1000}
+      GPU_ARCH: ${ANVIL_GPU_ARCH:-gfx1201}
   # The GPUs: /dev/kfd and the render nodes are what ROCm needs (no display access).
   devices: [/dev/kfd, /dev/dri]
   ipc: host
