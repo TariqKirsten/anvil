@@ -142,12 +142,15 @@ def _model(form: dict, token: str | None) -> dict:
 
 
 def _check_hyper(h: dict) -> None:
-    try:
-        lr = float(h["learningRate"])
-    except (TypeError, ValueError):
-        raise ValueError("The learning rate isn't a number.") from None
-    if not 0 < lr < 1:
-        raise ValueError("Use a learning rate between 0 and 1.")
+    for key, name in (("learningRate", "learning rate"), ("headLearningRate", "head learning rate")):
+        if key == "headLearningRate" and not h.get(key):
+            continue  # only Clef has a head; the trainer's default applies when it's left out
+        try:
+            lr = float(h[key])
+        except (TypeError, ValueError):
+            raise ValueError(f"The {name} isn't a number.") from None
+        if not 0 < lr < 1:
+            raise ValueError(f"Use a {name} between 0 and 1.")
     for key, low in (("epochs", 1), ("batchSize", 1), ("gradAccum", 1), ("maxLength", 16)):
         if not isinstance(h.get(key), int) or h[key] < low:
             raise ValueError(f"{key} must be a whole number of at least {low}.")
@@ -158,8 +161,6 @@ def _check_hyper(h: dict) -> None:
 def create(form: dict, prepare: dict, token: str | None) -> str:
     train_as = form["trainAs"]
     method = form["decisionMethod"] if train_as == "decision" else form["lmFormat"]
-    if train_as == "decision" and method == "clef":
-        raise ValueError("Training the Clef head arrives in step 6. Pick Letters for now.")
     if form["trainingType"] == "qlora":
         raise ValueError("QLoRA (4-bit) comes later. Pick LoRA or Full for now.")
     _check_hyper(form["hyper"])

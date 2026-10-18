@@ -166,6 +166,8 @@ export interface RunStatus {
   world?: number;
   steps_per_epoch?: number;
   items_per_step?: number;
+  head_m?: number; // Clef's head, in millions of parameters
+  head_first?: number; // steps the new head trains alone
   trainable_m?: number;
   last_eval?: Record<string, number>;
   best_step?: number | null;

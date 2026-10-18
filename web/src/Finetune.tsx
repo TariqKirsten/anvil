@@ -116,7 +116,9 @@ export function Finetune({ onLogout }: { onLogout: () => void }) {
       <GpuSection {...props} list={gpus} error={gpuError} />
       <DataSection {...props} onReady={onDataReady} />
       <HyperSection {...props} cards={Math.max(1, pickedGpus(form, gpus).length)}
-        trainItems={prepared ? (prepared.items?.train ?? prepared.rows.train) : null} />
+        trainItems={!prepared ? null
+          : form.trainAs === "decision" && form.decisionMethod === "letters" ? (prepared.items?.train ?? prepared.rows.train)
+          : prepared.rows.train} />
       <CheckpointSection {...props} />
 
       <footer className="footer">

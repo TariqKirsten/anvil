@@ -1,9 +1,11 @@
 """What the model learns from a row, and how its loss and validation scores are computed.
 
-Two tasks:
+Three tasks:
 - DecisionLetters: a decision model the letters way. Each (state, question) becomes a prompt that lists the options as
   A, B, C... and ends at "Answer:". The model's next-token scores for the option letters are its answer, so nothing is
   generated. Option order is shuffled per row (seeded) while training, so no letter is favoured. One question per pass.
+- DecisionClef: a decision model the Clef way (Cloudflare's joint schema head, anvil/vendor/clef). A row's state and all
+  its questions are one prompt, and a small new network, the head, scores every option. One pass per row.
 - LanguageModel: ordinary next-token training on chat (only the assistant's turns are learned), prompt and completion
   (only the completion), or plain text (all of it).
 
@@ -109,13 +111,28 @@ def target(question: dict, answer, opts: list[tuple[object, str]]) -> list[float
     return vec
 
 
+class NoHead:
+    """Tasks that train only the model itself (Clef also trains its head)."""
+
+    head = None
+
+    def parameters(self) -> list:
+        return []
+
+    def save(self, folder) -> None:
+        pass
+
+    def load(self, folder) -> None:
+        pass
+
+
 @dataclass
 class Item:
     row: int
     name: str
 
 
-class DecisionLetters:
+class DecisionLetters(NoHead):
     kind = "decision"
 
     def __init__(self, tokenizer, max_length: int, seed: int):
@@ -307,7 +324,7 @@ def calibration_error(confidence: np.ndarray, correct: np.ndarray, bins: int = 1
 
 # ---------------------------------------------------------------- language models
 
-class LanguageModel:
+class LanguageModel(NoHead):
     kind = "lm"
 
     def __init__(self, tokenizer, fmt: str, max_length: int):
@@ -424,6 +441,155 @@ class LanguageModel:
     def metrics(out: dict, rows: int) -> dict:
         loss = out["total"] / max(out["count"], 1)
         return {"val_loss": loss, "perplexity": float(math.exp(min(loss, 50))), "rows": rows}
+
+
+# ---------------------------------------------------------------- decision models, the Clef way
+
+def clef_head_config(hidden_size: int) -> dict:
+    """A fresh head's size, as in Cloudflare's releases: 1024 wide (512 on models narrower than 3072), 2 evidence-routing
+    layers and 4 decoder layers, an attention head per 64 dimensions, and a feed-forward 4 times the width."""
+    width = 1024 if hidden_size >= 3072 else 512
+    return {"hidden_size": hidden_size, "width": width, "routing_layers": 2, "layers": 4, "heads": width // 64,
+            "feedforward": 4 * width, "dropout": 0.0}
+
+
+def clef_target(question: dict, answer, option_ids: tuple[str, ...]) -> list[float]:
+    """The answer as a probability per Clef option: noul's options are "true" and "false", choice's are its keys in
+    sorted order, and score's are the levels "0", "1", ..."""
+    kind = question["type"]
+    keys = [True, False] if kind == "noul" else [int(o) for o in option_ids] if kind == "score" else list(option_ids)
+    return target(question, answer, [(k, "") for k in keys])
+
+
+class DecisionClef:
+    """Each row (its state and every question with its allowed options) becomes one prompt, built by Clef's own
+    encode_record. The head reads the model's hidden states over each question and option, and the option words'
+    output embeddings, and gives one score per option. The loss is cross-entropy against the gold answer, averaged over
+    questions. An item is a row, since one pass answers all of its questions."""
+
+    kind = "decision"
+
+    def __init__(self, tokenizer, max_length: int, head: torch.nn.Module, config: dict):
+        from .vendor.clef import joint_schema_model as clef
+
+        self.clef = clef
+        self.tok, self.max_length, self.head, self.config = tokenizer, max_length, head, config
+
+    def parameters(self) -> list:
+        return list(self.head.parameters())
+
+    def save(self, folder) -> None:
+        """The head as Clef releases ship it: joint_head_config.json and joint_head.safetensors."""
+        from pathlib import Path
+
+        from safetensors.torch import save_file
+
+        folder = Path(folder)
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "joint_head_config.json").write_text(json.dumps(self.config, indent=1))
+        save_file({k: v.detach().cpu().contiguous() for k, v in self.head.state_dict().items()},
+                  str(folder / "joint_head.safetensors"))
+
+    def load(self, folder) -> None:
+        from pathlib import Path
+
+        from safetensors.torch import load_file
+
+        device = next(self.head.parameters()).device
+        state = load_file(str(Path(folder) / "joint_head.safetensors"), device=str(device))
+        self.head.load_state_dict({k: v.to(torch.float32) for k, v in state.items()}, strict=True)
+
+    def items(self, df) -> tuple[list[int], dict]:
+        parsed = {"state": [], "questions": [], "gold": []}
+        for state, questions, gold in zip(df["state"], df["questions"], df["gold"]):
+            parsed["state"].append(_value(state))
+            parsed["questions"].append(_value(questions))
+            parsed["gold"].append(_value(gold))
+        self._check_room(parsed["questions"])
+        return list(range(len(parsed["state"]))), parsed
+
+    def _check_room(self, all_questions: list[dict]) -> None:
+        """Every question goes in the prompt, so they must fit in max length: say so before training starts. Rows
+        usually share a few sets of questions, so each set is tried once (up to 2,000 of them)."""
+        seen = set()
+        for questions in all_questions:
+            key = json.dumps(questions, sort_keys=True)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                self.clef.encode_record(self.tok, {"state": "", "questions": questions}, max_length=self.max_length)
+            except ValueError as error:
+                raise ValueError(f"Max length {self.max_length} is too short for the Clef prompt, which holds every "
+                                 f"question of a row ({error}). Raise Max length under Hyperparameters, Advanced.") from None
+            if len(seen) >= 2000:
+                return
+
+    def lengths(self, items: list[int], parsed: dict) -> np.ndarray:
+        """Rough token counts (about 3.5 characters per token), only used to group similar lengths in a batch."""
+        return np.array([min(self.max_length, (len(self.clef.render(parsed["state"][i]))
+                                               + len(json.dumps(parsed["questions"][i]))) // 3.5 + 64) for i in items])
+
+    def collate(self, items: list[int], parsed: dict, shuffle: bool = False) -> dict:
+        records, targets = [], []
+        for i in items:
+            questions = parsed["questions"][i]
+            record = self.clef.encode_record(self.tok, {"state": parsed["state"][i], "questions": questions},
+                                             max_length=self.max_length)
+            records.append(record)
+            targets.append([torch.tensor(clef_target(questions[q.question_id], parsed["gold"][i][q.question_id],
+                                                     q.option_ids)) for q in record.questions])
+        ids = [list(r.input_ids) for r in records]
+        return {"input_ids": pad(ids, self.tok.pad_token_id or 0), "lengths": torch.tensor([len(x) for x in ids]),
+                "records": records, "targets": targets, "tokens": sum(len(x) for x in ids)}
+
+    def logits(self, model, batch: dict) -> list[list[torch.Tensor]]:
+        """One tensor of option scores per question, per row."""
+        device = next(model.parameters()).device
+        ids = batch["input_ids"].to(device)
+        lengths = batch["lengths"].to(device)
+        mask = (torch.arange(ids.shape[1], device=device)[None, :] < lengths[:, None]).long()
+        _, output_embeddings = decoder_and_head(model)
+        return self.head(hidden_states(model, ids), ids, mask, batch["records"], output_embeddings)
+
+    def loss(self, model, batch: dict) -> torch.Tensor:
+        total, count = None, 0
+        for record_logits, record_targets in zip(self.logits(model, batch), batch["targets"]):
+            for scores, t in zip(record_logits, record_targets):
+                term = -(t.to(scores.device) * torch.log_softmax(scores.float(), dim=-1)).sum()
+                total = term if total is None else total + term
+                count += 1
+        return total / count
+
+    def evaluate(self, model, items: list[int], parsed: dict, batch_size: int, autocast) -> dict:
+        return self.metrics(self.outputs(model, items, parsed, batch_size, autocast), len(items))
+
+    @torch.no_grad()
+    def outputs(self, model, items: list[int], parsed: dict, batch_size: int, autocast) -> dict:
+        losses, correct, confidence, yes = [], [], [], {}
+        order = sorted(items, key=lambda i: len(self.clef.render(parsed["state"][i])))
+        for start in range(0, len(order), batch_size):
+            batch = self.collate(order[start:start + batch_size], parsed)
+            with autocast():
+                logits = self.logits(model, batch)
+            for record, record_logits, record_targets in zip(batch["records"], logits, batch["targets"]):
+                for question, scores, t in zip(record.questions, record_logits, record_targets):
+                    p = torch.softmax(scores.float(), dim=-1).cpu()
+                    losses.append(float(-(t * torch.log(p.clamp_min(1e-9))).sum()))
+                    correct.append(bool(p.argmax() == t.argmax()))
+                    confidence.append(float(p.max()))
+                    if question.question_type == self.clef.QUESTION_TYPES["noul"]:  # option 0 is "true"
+                        yes.setdefault(question.question_id, ([], []))
+                        yes[question.question_id][0].append(float(p[0]))
+                        yes[question.question_id][1].append(bool(t[0] >= 0.5))
+        return {"loss": losses, "correct": correct, "confidence": confidence, "yes": yes}
+
+    combine = staticmethod(DecisionLetters.combine)
+
+    @staticmethod
+    def metrics(out: dict, rows: int) -> dict:
+        # rows: the questions scored, like the letters way (a row with several questions counts several times)
+        return DecisionLetters.metrics(out, len(out["loss"]))
 
 
 def length_grouped_batches(lengths: np.ndarray, batch_size: int, rng: random.Random, chunk: int = 4096) -> list[list[int]]:

@@ -37,7 +37,7 @@ def tiny_model(tmp_path_factory) -> Path:
     assert all(len(tok.encode(f" {c}", add_special_tokens=False)) == 1 for c in tasks.LETTERS)
     model = LlamaForCausalLM(LlamaConfig(
         vocab_size=len(tok), hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=4,
-        num_key_value_heads=2, max_position_embeddings=512, pad_token_id=tok.pad_token_id,
+        num_key_value_heads=2, max_position_embeddings=2048, pad_token_id=tok.pad_token_id,
         eos_token_id=tok.eos_token_id, tie_word_embeddings=False))
     folder = tmp_path_factory.mktemp("tiny-model")
     model.save_pretrained(folder)
@@ -288,7 +288,7 @@ def test_a_judge_still_checking_after_stop_keeps_its_card_and_serves_the_resume(
 
 
 @pytest.mark.parametrize("change, reason", [
-    ({"decisionMethod": "clef"}, "step 6"),
+    ({"hyper": {**FORM["hyper"], "headLearningRate": "big"}}, "head learning rate isn't a number"),
     ({"trainingType": "qlora"}, "QLoRA"),
     ({"trainAs": "lm"}, "needs chat"),
     ({"hyper": {**FORM["hyper"], "learningRate": "fast"}}, "isn't a number"),

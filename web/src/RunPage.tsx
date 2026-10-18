@@ -160,7 +160,8 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           <div>
             <h1>{cfg.name}</h1>
             <p className="hint">
-              {cfg.model.id} · {decision ? `decision model (${cfg.method})` : `language model (${cfg.method})`} ·{" "}
+              {cfg.model.id} · {decision ? `decision model (${cfg.method === "clef" ? "Clef head" : cfg.method})` : `language model (${cfg.method})`} ·{" "}
+              {st.head_m ? `head ${st.head_m}M parameters · ` : ""}
               {cfg.training_type === "lora" ? "LoRA" : "full fine-tuning"} ·{" "}
               {cfg.judge_gpu != null ? `trains on ${cardNames(cards)}, checks on GPU ${cfg.judge_gpu}`
                 : cards.length > 1 ? `trains on ${cardNames(cards)}` : `GPU ${cards[0]}`} ·

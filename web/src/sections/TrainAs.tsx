@@ -2,7 +2,7 @@ import { PICK_BY, type FormState, type SectionProps } from "../form";
 import { Field, Section, Segmented } from "../ui";
 
 const METHOD_HINTS = {
-  clef: "A small new network scores every option, for all questions in one pass.",
+  clef: "A small new network, the head, reads the model and scores every option: all of a row's questions in one pass. Cloudflare's Clef design.",
   letters: "The model picks a letter for each option, one question per pass.",
   chat: "Conversations, trained through the model's chat template.",
   text: "Raw text, for continued pre-training or plain completion.",

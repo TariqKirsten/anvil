@@ -41,7 +41,7 @@ def run(cfg: dict, run_dir: Path, report: train.Reporter) -> None:
 
     report.update(state="loading", stage="Loading the model")
     tok, model = train.load_model(cfg, device, dtype, None)
-    task = train.make_task(cfg, tok)
+    task = train.make_task(cfg, tok, model, device)
     val_items, val_parsed = task.items(train.read_split(cfg, "validation", train.VAL_ROWS))
     batch = max(1, int(h["batchSize"]) * 2)
     def score(step: int) -> None:
@@ -62,7 +62,7 @@ def run(cfg: dict, run_dir: Path, report: train.Reporter) -> None:
         for path in pending:
             if not path.exists():  # deleted meanwhile (an older checkpoint the trainer no longer needs)
                 continue
-            model = train.load_weights(model, path, cfg, device, dtype)
+            model = train.load_weights(model, task, path, cfg, device, dtype)
             score(train.step_of(path))
             judged.add(train.step_of(path))
         trainer = json.loads((run_dir / "status.json").read_text())

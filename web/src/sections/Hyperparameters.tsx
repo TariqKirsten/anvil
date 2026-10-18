@@ -18,6 +18,7 @@ export function HyperSection({ form, update, errors, cards, trainItems }: Sectio
 }) {
   const [advanced, setAdvanced] = useState(false);
   const h = form.hyper;
+  const clef = form.trainAs === "decision" && form.decisionMethod === "clef";
   const perStep = h.batchSize * cards * h.gradAccum;
   const stepsPerEpoch = trainItems && perStep > 0 ? Math.ceil(trainItems / perStep) : null;
   const epochHint = stepsPerEpoch
@@ -46,6 +47,14 @@ export function HyperSection({ form, update, errors, cards, trainItems }: Sectio
         {num("batchSize", cards > 1 ? "Batch size (per card)" : "Batch size", 1,
           `${perStep.toLocaleString()} rows per step${cards > 1 ? ` on ${cards} cards` : ""}`)}
         {lora && num("loraRank", "LoRA rank")}
+        {clef && (
+          <Field id="headLearningRate" label="Head learning rate" error={errors.headLearningRate}
+            hint="the new head; it trains alone for the first 10% of steps">
+            <input id="headLearningRate" value={h.headLearningRate}
+              aria-invalid={errors.headLearningRate ? true : undefined}
+              onChange={(e) => setH({ headLearningRate: e.target.value })} />
+          </Field>
+        )}
       </div>
       <button type="button" className="link toggle" aria-expanded={advanced} onClick={() => setAdvanced((a) => !a)}>
         {advanced ? <IconChevronUp size={16} aria-hidden /> : <IconChevronDown size={16} aria-hidden />} Advanced
@@ -63,7 +72,7 @@ export function HyperSection({ form, update, errors, cards, trainItems }: Sectio
           </Field>
           {num("weightDecay", "Weight decay", 0.01)}
           {num("gradAccum", "Gradient accumulation", 1, "batches per step")}
-          {num("maxLength", "Max length (tokens)", 128)}
+          {num("maxLength", "Max length (tokens)", 128, clef ? "the whole row: its state and every question" : undefined)}
           {num("seed", "Seed")}
           <Field id="precision" label="Precision">
             <select id="precision" value={h.precision}

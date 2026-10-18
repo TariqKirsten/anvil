@@ -26,6 +26,7 @@ export interface FormState {
   };
   hyper: {
     learningRate: string;
+    headLearningRate: string; // Clef's head only
     epochs: number;
     batchSize: number;
     loraRank: number;
@@ -66,7 +67,7 @@ export const DEFAULTS: FormState = {
   name: "new-run",
   trainAs: "decision",
   lmFormat: "chat",
-  decisionMethod: "letters", // the Clef head arrives in step 6
+  decisionMethod: "letters", // the measured baseline; Clef becomes the default if it wins a bake-off
   trainingType: "lora",
   model: { source: "hub", repo: null, folder: "" },
   gpus: null,
@@ -82,6 +83,7 @@ export const DEFAULTS: FormState = {
   },
   hyper: {
     learningRate: "2e-4",
+    headLearningRate: "1e-4",
     epochs: 1,
     batchSize: 8,
     loraRank: 32,
@@ -160,6 +162,10 @@ export function validate(form: FormState): Errors {
   const lr = Number(h.learningRate);
   if (!h.learningRate.trim() || !Number.isFinite(lr) || lr <= 0 || lr >= 1)
     errors.learningRate = "Use a number between 0 and 1, like 2e-4.";
+  const headLr = Number(h.headLearningRate);
+  if (form.trainAs === "decision" && form.decisionMethod === "clef" &&
+      (!h.headLearningRate.trim() || !Number.isFinite(headLr) || headLr <= 0 || headLr >= 1))
+    errors.headLearningRate = "Use a number between 0 and 1, like 1e-4.";
   if (!wholeNumber(h.epochs, 1, 100)) errors.epochs = "Use a whole number from 1 to 100.";
   if (!wholeNumber(h.batchSize, 1, 4096)) errors.batchSize = "Use a whole number of at least 1.";
   if (form.trainingType !== "full" && !wholeNumber(h.loraRank, 1, 1024)) errors.loraRank = "Use 1 to 1024.";

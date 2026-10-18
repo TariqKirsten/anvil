@@ -102,12 +102,14 @@ class Group:
 
 
 class _Loss(torch.nn.Module):
-    """The model and the task's loss as one module, so DistributedDataParallel sees the whole forward pass (the tasks
-    read the model's hidden states directly instead of calling its forward)."""
+    """The model, the task's own weights (Clef's head) and the task's loss as one module, so DistributedDataParallel
+    sees the whole forward pass (the tasks read the model's hidden states directly instead of calling its forward)
+    and averages the head's gradients too."""
 
     def __init__(self, model, task):
         super().__init__()
         self.model = model
+        self.head = task.head
         self.task = task
 
     def forward(self, batch: dict) -> torch.Tensor:

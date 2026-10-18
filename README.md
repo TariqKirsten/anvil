@@ -70,10 +70,19 @@ every validation check, the final test, the checkpoints and the log.
   training cards × gradient accumulation rows. The form shows how many steps an epoch takes; **Max steps** cuts a run
   short (handy for quick tests).
 
-- **Decision models** train the letters way: each question lists its options as A, B, C… and the model's scores for
-  the letters are its answer. Option order is shuffled per row so no letter is favoured; validation asks every question
-  in both orders and averages. Validation reports loss, accuracy, AUROC per yes/no question, the catch rate at 1%
-  false alarms, the false alarms at 50%, and the calibration error.
+- **Decision models** train one of two ways (Method, under Train as):
+  - **Letters**: each question lists its options as A, B, C… and the model's scores for the letters are its answer.
+    Option order is shuffled per row so no letter is favoured; validation asks every question in both orders and
+    averages. Nothing is added to the model. One pass per question.
+  - **Clef head**: Cloudflare's design. A row's state and all its questions are one prompt, and a small new network
+    (the head, about 30M parameters on a 2B model) reads the model's hidden states at each question and option and
+    scores every option: one pass per row. A new head trains alone for the first 10% of the steps, at its own learning
+    rate (Head learning rate, default 1e-4), then the model joins in. A Clef release as the base model brings its
+    trained head along. The head is saved as Clef releases ship it (`joint_head_config.json`,
+    `joint_head.safetensors`), so Cloudflare's own code loads the result. The prompt holds every question, so give it
+    room in Max length.
+  - Validation reports loss, accuracy, AUROC per yes/no question, the catch rate at 1% false alarms, the false alarms
+    at 50%, and the calibration error, the same for both methods, so they can be compared.
 - **Language models** learn chat (only the assistant's replies), prompt and completion (only the completion), or plain
   text.
 - Checkpoints keep the trainable weights and the optimizer, so **Stop** loses at most one step and **Resume** continues
@@ -130,6 +139,7 @@ fast kernels for linear-attention models such as Qwen3.5. On an R9700 that makes
 | `server/anvil/train.py` | The trainer process; `tasks.py` holds what each kind of model learns and how it's scored |
 | `server/anvil/judge.py` | The judge process: checks checkpoints on a spare GPU; `picking.py` ranks them and decides when to stop |
 | `server/anvil/parallel.py` | Training on several GPUs at once: one process per card, gradients averaged every step |
+| `server/anvil/vendor/clef/` | Cloudflare's Clef reference code and licence (Apache-2.0), unmodified; see its `NOTICE.md` |
 | `server/tests/` | `docker compose exec -w /workspace/server dev python -m pytest` |
 | `web/src/` | The React screen: `Finetune.tsx`, `Runs.tsx`, `RunPage.tsx`, `Settings.tsx`, sections in `sections/` |
 
@@ -146,4 +156,4 @@ Built in steps:
    model, early stopping, and a final test on the test set.
 5. **Several GPUs** (done): every ticked card trains on its share of each batch; checks are shared, or run on a
    free unticked card.
-6. The Clef decision head.
+6. **The Clef head** (done): decision models the Clef way, next to letters, on one GPU or several, with the judge.
