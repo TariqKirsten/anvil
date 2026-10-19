@@ -21,9 +21,16 @@ const QUANTS: { name: string; bits: number; hint: string }[] = [
 type Version = RunDetail["versions"][number];
 
 function versionLabel(v: Version, best: number | null) {
-  const score = v.score != null && v.metric ? ` · ${METRIC_LABEL[v.metric] ?? v.metric} ${v.score.toFixed(3)}` : "";
-  if (v.version === "final") return `Finished model${v.step != null ? ` · step ${v.step.toLocaleString()}` : ""}${score}`;
-  return `Step ${(v.step ?? 0).toLocaleString()}${score}${v.step === best ? " · best" : ""}`;
+  if (v.version === "final") return `Finished model${v.step != null ? ` · step ${v.step.toLocaleString()}` : ""}`;
+  return `Step ${(v.step ?? 0).toLocaleString()}${v.step === best ? " · best" : ""}`;
+}
+
+// The chosen version's score goes under the select: with a score in every option, they're too long for a phone.
+function versionScore(v: Version | undefined) {
+  if (!v) return undefined;
+  if (v.score == null || !v.metric) return v.version === "final" ? undefined : "Not checked yet.";
+  const label = METRIC_LABEL[v.metric] ?? v.metric;
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)} ${v.score.toFixed(3)}.`;
 }
 
 function exportName(version: string) {
@@ -67,7 +74,7 @@ export function ExportSection({ run, id, best, onStarted }: {
   return (
     <Section title="Export as GGUF">
       <div className="export-form">
-        <Field id="export-version" label="Version">
+        <Field id="export-version" label="Version" hint={versionScore(run.versions.find((v) => v.version === version))}>
           <select id="export-version" value={version} onChange={(e) => setVersion(e.target.value)}>
             {run.versions.map((v) => (
               <option key={v.version} value={v.version}>
@@ -114,17 +121,18 @@ export function ExportSection({ run, id, best, onStarted }: {
                 <ul className="export-files">
                   {(e.files ?? []).map((f) => (
                     <li key={f.name}>
-                      <a href={`/api/runs/${id}/exports/${e.version}/${f.name}`} download>
-                        <IconDownload size={15} aria-hidden /> {f.name}
+                      <a href={`/api/runs/${id}/exports/${e.version}/${f.name}`} download title={f.name}>
+                        <IconDownload size={15} aria-hidden />
+                        <span className="export-name"><span dir="ltr">{f.name}</span></span>
                       </a>
                       <span className="file-size">{bytes(f.size)}</span>
                     </li>
                   ))}
-                  <li>
+                  <li className="export-about">
                     <a href={`/api/runs/${id}/exports/${e.version}/anvil.json`} download>
                       <IconDownload size={15} aria-hidden /> anvil.json
                     </a>
-                    <span className="file-size">what it is, how to prompt it</span>
+                    <span className="file-note">what it is, how to prompt it</span>
                   </li>
                 </ul>
               )}

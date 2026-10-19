@@ -1276,14 +1276,16 @@ h1 {
   margin-top: 0;
 }
 
+/* A label may take two lines where the cards are narrow, split evenly (balance). Then every card in the grid takes
+   that height (1fr rows), and space-between keeps the numbers lined up along the bottom. */
 .stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  grid-auto-rows: 1fr;
   gap: 10px;
   margin: 14px 0 10px;
 }
 
-/* space-between: when one label takes two lines, the numbers still line up along the bottom. */
 .stats > div {
   display: flex;
   flex-direction: column;
@@ -1297,6 +1299,7 @@ h1 {
 .stat-label {
   color: var(--text-2);
   font-size: 12px;
+  text-wrap: balance;
 }
 
 .stat-value {
@@ -1311,18 +1314,25 @@ h1 {
   background: var(--bad-bg);
   color: var(--bad);
   font-size: 13px;
+  overflow-wrap: anywhere; /* errors quote paths and tensor names longer than a phone is wide */
 }
 
 .chart-grid-2 {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   gap: 0 16px;
 }
 
+.chart {
+  position: relative;
+}
+
+/* pan-y: a finger moving sideways slides along the values, and one moving up or down still scrolls the page. */
 .chart svg {
   display: block;
   width: 100%;
   height: auto;
+  touch-action: pan-y;
 }
 
 .chart-grid {
@@ -1399,6 +1409,67 @@ h1 {
   stroke: var(--ok);
   stroke-width: 1;
   stroke-dasharray: 3 3;
+}
+
+/* The step pointed at: a line through it, a dot on each series, and the box of values beside them. */
+.chart-hover line {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.chart-hover circle {
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+
+.chart-hover .chart-accent {
+  fill: var(--accent);
+}
+
+.chart-hover .chart-ok {
+  fill: var(--ok);
+}
+
+.chart-hover .chart-warn {
+  fill: var(--warn);
+}
+
+.chart-hover .chart-muted {
+  fill: var(--muted);
+}
+
+.chart-tip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.chart-tip-step {
+  color: var(--text-2);
+}
+
+.chart-tip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.chart-tip-row .chart-key {
+  color: var(--text-2);
+}
+
+.chart-tip-value {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .chart-empty {
@@ -1787,6 +1858,18 @@ button:disabled {
   font-size: 13px;
 }
 
+/* Too narrow for each type's note beside it: the note goes under the name, in every row alike. */
+@media (max-width: 480px) {
+  .quant {
+    grid-template-columns: 16px 76px minmax(0, 1fr);
+    row-gap: 0;
+  }
+
+  .quant-hint {
+    grid-column: 2 / -1;
+  }
+}
+
 .export-actions {
   display: flex;
   align-items: center;
@@ -1849,7 +1932,6 @@ button:disabled {
   min-width: 0;
   color: var(--text);
   text-decoration: none;
-  overflow-wrap: anywhere;
 }
 
 .export-files a:hover {
@@ -1857,10 +1939,37 @@ button:disabled {
   text-decoration: underline;
 }
 
+.export-files a svg {
+  flex: none;
+}
+
+/* A name too long for its row is cut short at the start, so its end (the step and the type, as in -Q4_K_M.gguf)
+   still shows: the box runs right to left to put the cut there, and the name inside reads left to right (dir="ltr"). */
+.export-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+}
+
 .file-size {
   flex: none;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* anvil.json's note is the one thing in the list that wraps, on the narrowest phones, so its name stays whole. */
+.export-about a {
+  flex: none;
+}
+
+.file-note {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+  text-wrap: balance;
 }
 
 /* ---- each question's scores (QuestionScores.tsx) */
