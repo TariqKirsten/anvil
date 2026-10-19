@@ -203,7 +203,13 @@ function Preview({ info }: { info: DatasetInfo }) {
           </thead>
           <tbody>
             {info.preview.map((row, i) => (
-              <tr key={i}>{columns.map((c) => <td key={c}>{row[c]}</td>)}</tr>
+              <tr key={i}>
+                {columns.map((c) => (
+                  <td key={c}>
+                    <div className="cell" title={row[c]}>{row[c]}</div>
+                  </td>
+                ))}
+              </tr>
             ))}
           </tbody>
         </table>
@@ -312,28 +318,30 @@ function Summary({ report }: { report: PrepareReport }) {
       <p className="ok-text summary-head">
         <IconCircleCheck size={16} aria-hidden /> Prepared in {Math.round(report.seconds)} s · {report.format_label}
       </p>
-      <table>
-        <thead>
-          <tr>
-            <th></th>
-            <th>Rows</th>
-            <th>Copies removed</th>
-            <th>Shared with train</th>
-            <th>Broken rows</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(({ slot, label }) => (
-            <tr key={slot}>
-              <td>{label}</td>
-              <td>{report.rows[slot].toLocaleString()}</td>
-              <td>{report.removed[slot] ? removed(slot).toLocaleString() : "–"}</td>
-              <td>{report.leaks[slot] !== undefined ? report.leaks[slot]!.toLocaleString() : "–"}</td>
-              <td>{report.invalid[slot] !== undefined ? report.invalid[slot]!.toLocaleString() : "–"}</td>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>Rows</th>
+              <th>Copies removed</th>
+              <th>Shared with train</th>
+              <th>Broken rows</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map(({ slot, label }) => (
+              <tr key={slot}>
+                <td>{label}</td>
+                <td>{report.rows[slot].toLocaleString()}</td>
+                <td>{report.removed[slot] ? removed(slot).toLocaleString() : "–"}</td>
+                <td>{report.leaks[slot] !== undefined ? report.leaks[slot]!.toLocaleString() : "–"}</td>
+                <td>{report.invalid[slot] !== undefined ? report.invalid[slot]!.toLocaleString() : "–"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       {conflicts > 0 && (
         <p className="warn-text">
           {conflicts.toLocaleString()} of the removed copies had a different answer than the row that was kept, so some
@@ -346,8 +354,12 @@ function Summary({ report }: { report: PrepareReport }) {
             list.slice(0, 3).map((p) => <li key={`${slot}-${p.row}`}>{slot} row {p.row + 1}: {p.reason}</li>))}
         </ul>
       )}
-      {report.questions && <p className="hint">{askedLine(report.questions)}</p>}
-      {report.notes.map((n) => <p key={n} className="hint">{n}</p>)}
+      {(report.questions || report.notes.length > 0) && (
+        <div>
+          {report.questions && <p className="hint">{askedLine(report.questions)}</p>}
+          {report.notes.map((n) => <p key={n} className="hint">{n}</p>)}
+        </div>
+      )}
     </div>
   );
 }

@@ -96,8 +96,10 @@ export function Finetune({ onLogout }: { onLogout: () => void }) {
         right={
           gpus && (
             <>
-              <Badge>{gpus.runtime.label}</Badge>
-              <Badge tone={found ? "ok" : "bad"}>{found === 1 ? "1 GPU found" : `${found} GPUs found`}</Badge>
+              <Badge className="runtime">{gpus.runtime.label}</Badge>
+              <Badge tone={found ? "ok" : "bad"} title={gpus.runtime.label}>
+                {found === 1 ? "1 GPU found" : `${found} GPUs found`}
+              </Badge>
             </>
           )
         }

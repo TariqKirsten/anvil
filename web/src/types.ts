@@ -186,6 +186,7 @@ export interface RunStatus {
   started?: number;
   finished?: number;
   stopped?: number | null;
+  updated?: number;
   error?: string | null;
   items?: number;
   world?: number;

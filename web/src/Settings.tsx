@@ -23,12 +23,13 @@ export function Settings({ onLogout }: { onLogout: () => void }) {
 
   return (
     <div className="page">
-      <Topbar onLogout={onLogout}>
-        <span className="page-title">Settings</span>
-      </Topbar>
+      <Topbar onLogout={onLogout} />
       <a className="back" href="#/">
         <IconArrowLeft size={16} aria-hidden /> Back to fine-tuning
       </a>
+      <div className="page-head">
+        <h1>Settings</h1>
+      </div>
       {error && <p className="field-error">{error}</p>}
       {account && (
         <>

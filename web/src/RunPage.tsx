@@ -158,7 +158,9 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   const cards = cfg.gpus ?? [cfg.gpu];
   const epoch = epochLine(st);
   const pct = st.total ? Math.min(100, (st.step / st.total) * 100) : 0;
-  const elapsed = st.started ? (st.finished ?? st.stopped ?? (ACTIVE.has(st.state) ? Date.now() / 1000 : st.started)) - st.started : null;
+  // A failed run never gets a finish time, so its last update stands in for one.
+  const end = st.finished ?? st.stopped ?? (ACTIVE.has(st.state) ? Date.now() / 1000 : st.updated);
+  const elapsed = st.started && end ? end - st.started : null;
   const allowed = `${cfg.checkpoints.falseAlarmPercent ?? 1}%`; // the catch rate's false alarms
   const has = (key: string) => evals.some((m) => typeof m[key] === "number");
   // Overall is worth a column when the data mixes question types; with one type it's that type's average.
@@ -306,7 +308,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
               { label: "smoothed", points: smooth(train.map((m) => ({ x: m.step, y: Number(m.loss) }))), tone: "accent" },
             ]} />
         </Section>
-        <Section title={`Validation: ${METRIC_LABEL[metric] ?? metric}`}>
+        <Section title={metric === "val_loss" ? "Validation loss" : `Validation: ${METRIC_LABEL[metric] ?? metric}`}>
           <Chart empty="Validation runs before training starts and at every checkpoint."
             marker={best != null ? { x: best, label: "best" } : undefined}
             series={[{

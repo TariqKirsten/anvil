@@ -1,24 +1,31 @@
 import { IconHammer, IconLogout, IconSettings } from "@tabler/icons-react";
 import type { ReactNode } from "react";
 
-// The bar at the top of every page: the name (a link home), the pages, whatever the page puts in the middle,
-// Settings and Log out.
+// The bar at the top of every page: the name (a link home), the pages, whatever the page puts in the middle and on
+// the right, Settings and Log out. On a phone the page's own part gets a row of its own.
 export function Topbar({ children, right, onLogout }: { children?: ReactNode; right?: ReactNode; onLogout: () => void }) {
   const here = window.location.hash;
   const runs = here.startsWith("#/runs");
+  const settings = here === "#/settings";
+  const finetune = !runs && !settings;
   return (
     <header className="topbar">
       <a className="brand" href="#/">
         <IconHammer size={20} aria-hidden /> anvil
       </a>
       <nav className="nav" aria-label="Pages">
-        <a href="#/" className={!runs && here !== "#/settings" ? "on" : ""}>New run</a>
-        <a href="#/runs" className={runs ? "on" : ""}>Runs</a>
+        <a href="#/" className={finetune ? "on" : ""} aria-current={finetune ? "page" : undefined}>New run</a>
+        <a href="#/runs" className={runs ? "on" : ""} aria-current={runs ? "page" : undefined}>Runs</a>
       </nav>
-      {children}
-      <div className="topbar-right">
-        {right}
-        <a className="icon-link" href="#/settings" aria-label="Settings" title="Settings">
+      {(children || right) && (
+        <div className="topbar-page">
+          {children}
+          {right && <div className="topbar-status">{right}</div>}
+        </div>
+      )}
+      <div className="topbar-account">
+        <a className={`icon-link${settings ? " on" : ""}`} href="#/settings" aria-label="Settings" title="Settings"
+          aria-current={settings ? "page" : undefined}>
           <IconSettings size={18} aria-hidden />
         </a>
         <button type="button" className="icon" aria-label="Log out" title="Log out" onClick={onLogout}>

@@ -40,9 +40,9 @@ export function Segmented<T extends string>(props: {
   );
 }
 
-export function Field(props: { id: string; label: string; error?: string; hint?: string; children: ReactNode }) {
+export function Field(props: { id: string; label: string; error?: string; hint?: string; className?: string; children: ReactNode }) {
   return (
-    <div className="field">
+    <div className={props.className ? `field ${props.className}` : "field"}>
       <label htmlFor={props.id}>{props.label}</label>
       {props.children}
       {props.error ? (
@@ -79,8 +79,13 @@ export function NumberInput(props: {
   );
 }
 
-export function Badge({ tone = "neutral", children }: { tone?: "ok" | "warn" | "bad" | "neutral" | "accent"; children: ReactNode }) {
-  return <span className={`badge badge-${tone}`}>{children}</span>;
+export function Badge({ tone = "neutral", className, title, children }: {
+  tone?: "ok" | "warn" | "bad" | "neutral" | "accent";
+  className?: string;
+  title?: string;
+  children: ReactNode;
+}) {
+  return <span className={`badge badge-${tone}${className ? ` ${className}` : ""}`} title={title}>{children}</span>;
 }
 
 const ICONS: Record<Status, ReactNode> = {

@@ -104,7 +104,9 @@ input[type="radio"] {
 
 input:focus-visible,
 select:focus-visible,
-button:focus-visible {
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -271,6 +273,7 @@ button.link {
 
 .brand {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 8px;
   font-size: 16px;
@@ -303,13 +306,9 @@ a.brand {
   color: inherit;
 }
 
-.icon-link:hover {
+.icon-link:hover,
+.icon-link.on {
   background: var(--surface-2);
-}
-
-.page-title {
-  color: var(--text-2);
-  font-weight: 500;
 }
 
 .back {
@@ -367,13 +366,34 @@ a.brand {
   margin-right: auto;
 }
 
+/* The page's own part of the top bar (the run name and the GPU badges on the fine-tuning screen). It takes the room
+   that's left, and the run name is the one thing in the bar that shrinks. */
+.topbar-page {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
 .run-name {
+  flex: 1 1 240px;
+  min-width: 120px;
   max-width: 240px;
   font-weight: 500;
 }
 
-.topbar-right {
+.topbar-status {
   display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.topbar-account {
+  display: flex;
+  flex: none;
   align-items: center;
   gap: 8px;
   margin-left: auto;
@@ -415,7 +435,8 @@ a.brand {
 }
 
 .grid-3,
-.grid-4 {
+.grid-4,
+.grid-checkpoints {
   display: grid;
   gap: 12px;
 }
@@ -424,12 +445,24 @@ a.brand {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
+/* auto-fill, so a short row keeps the same columns as a full one and two grids in a row line up. */
 .grid-4 {
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+}
+
+/* Checkpoints: three columns, and two of them for "Pick best by", whose options are long. */
+.grid-checkpoints {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-flow: row dense;
+}
+
+.grid-checkpoints .wide {
+  grid-column: span 2;
 }
 
 .grid-3 + .hint,
-.grid-4 + .hint {
+.grid-4 + .hint,
+.grid-checkpoints + .hint {
   margin-top: 14px;
 }
 
@@ -643,7 +676,7 @@ a.brand {
 
 .gpu-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
   gap: 10px;
 }
 
@@ -707,9 +740,17 @@ a.brand {
 
 .drop {
   width: 100%;
+  height: auto;
+  min-height: 34px;
   justify-content: flex-start;
   border-style: dashed;
   color: var(--text-2);
+}
+
+/* The train, validation and test cards in a row are as tall as the tallest one. */
+.field > .drop,
+.field > .slot {
+  flex: 1 0 auto;
 }
 
 .panel {
@@ -972,6 +1013,11 @@ a.brand {
   overflow-x: auto;
 }
 
+.preview-scroll + .hint,
+.question-group + .hint {
+  margin-top: 12px;
+}
+
 .preview table,
 .summary table {
   width: 100%;
@@ -999,7 +1045,27 @@ a.brand {
   max-width: 320px;
   font-family: var(--mono);
   font-size: 12px;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* A few lines of each value, at a width that stays readable; the table scrolls sideways when the columns don't fit,
+   and the whole value is in the tooltip. */
+.preview .cell {
+  display: -webkit-box;
+  min-width: 140px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.summary th,
+.summary td {
+  white-space: nowrap;
 }
 
 .summary td:not(:first-child),
@@ -1053,6 +1119,7 @@ a.brand {
 
 .nav {
   display: flex;
+  flex: none;
   gap: 4px;
 }
 
@@ -1062,6 +1129,7 @@ a.brand {
   color: var(--text-2);
   font-size: 13.5px;
   text-decoration: none;
+  white-space: nowrap;
 }
 
 .nav a:hover {
@@ -1087,6 +1155,7 @@ h1 {
   font-size: 20px;
   font-weight: 600;
   letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
 }
 
 .button-link {
@@ -1114,9 +1183,10 @@ h1 {
   padding: 4px 0;
 }
 
+/* Every row is its own grid, so the state column has a fixed width: then the progress bars line up. */
 .run-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 220px auto;
+  grid-template-columns: minmax(0, 1fr) 220px 76px;
   align-items: center;
   gap: 16px;
   padding: 12px 20px;
@@ -1141,17 +1211,26 @@ h1 {
   min-width: 0;
 }
 
+.run-row > .badge {
+  justify-self: end;
+}
+
 .run-title {
   font-weight: 500;
 }
 
+.run-title,
 .run-meta,
 .run-steps {
   overflow: hidden;
-  color: var(--muted);
-  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.run-meta,
+.run-steps {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .run-progress .bar {
@@ -1166,12 +1245,19 @@ h1 {
   gap: 12px;
 }
 
+/* The name and its details take the room; the state and the buttons stay top right until the screen is narrow. */
+.run-head > div:first-child {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
 .run-head .hint {
   margin-top: 4px;
 }
 
 .run-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -1197,9 +1283,11 @@ h1 {
   margin: 14px 0 10px;
 }
 
+/* space-between: when one label takes two lines, the numbers still line up along the bottom. */
 .stats > div {
   display: flex;
   flex-direction: column;
+  justify-content: space-between;
   gap: 2px;
   padding: 10px 12px;
   border-radius: var(--radius);
@@ -1400,14 +1488,74 @@ h1 {
   }
 }
 
+/* Too narrow for the runtime badge as well: the GPU badge's tooltip still names it. */
+@media (max-width: 800px) {
+  .topbar .runtime {
+    display: none;
+  }
+}
+
 @media (max-width: 640px) {
-  .topbar {
-    flex-wrap: wrap;
+  .page {
+    padding: 0 16px 24px;
   }
 
-  .topbar-right {
+  /* The name, the pages and the account icons on the first row; the page's own part on a row of its own. Not
+     sticky: on a phone it would cover too much of the screen. */
+  .topbar {
+    position: static;
     flex-wrap: wrap;
-    margin-left: 0;
+    row-gap: 12px;
+  }
+
+  .topbar-page {
+    order: 1;
+    flex-basis: 100%;
+  }
+
+  .run-name {
+    max-width: none;
+  }
+
+  .section {
+    padding: 16px;
+  }
+
+  .grid-checkpoints {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* The data picker: its title and close button on top, the three sources across the full width below. */
+  .picker-head .segmented {
+    order: 1;
+    flex-basis: 100%;
+  }
+
+  .picker-head .segmented button {
+    flex: 1 1 auto;
+    justify-content: center;
+    height: auto;
+    min-height: 28px;
+    padding: 2px 6px;
+    font-size: 13px;
+    line-height: 1.25;
+    white-space: normal;
+  }
+
+  /* A model or dataset name is the thing to read in a result, so it wraps instead of being cut short. */
+  .result-id {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  /* The token's buttons go under the field rather than beside it. */
+  .token-form .field {
+    flex-basis: 100%;
+  }
+
+  .token-form .form-actions {
+    flex-basis: 100%;
+    margin-top: 0;
   }
 
   .check {
@@ -1429,6 +1577,23 @@ h1 {
   .run-progress {
     grid-column: 1 / -1;
     grid-row: 2;
+  }
+}
+
+@media (max-width: 400px) {
+  .grid-checkpoints {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .grid-checkpoints .wide {
+    grid-column: auto;
+  }
+}
+
+/* The smallest phones: a little less space between the name, the pages and the icons keeps them on one row. */
+@media (max-width: 360px) {
+  .topbar {
+    column-gap: 8px;
   }
 }
 

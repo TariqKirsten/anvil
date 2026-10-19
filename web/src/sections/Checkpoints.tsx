@@ -26,11 +26,11 @@ export function CheckpointSection({ form, update, errors, types }: SectionProps 
 
   return (
     <Section title="Checkpoints">
-      <div className="grid-4">
+      <div className="grid-checkpoints">
         {num("every", "Save every (steps)", 50)}
         {num("keepBest", "Keep best", 1)}
         {num("patience", "Stop after no gain for", 1, c.patience === 0 ? "never stops early" : "checks in a row")}
-        <Field id="pickBy" label="Pick best by">
+        <Field id="pickBy" label="Pick best by" className="wide">
           <select id="pickBy" value={options.some((o) => o.value === c.pickBy) ? c.pickBy : options[0].value}
             onChange={(e) => setC({ pickBy: e.target.value })}>
             {options.map((o) => (
