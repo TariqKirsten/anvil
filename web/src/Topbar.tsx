@@ -7,15 +7,17 @@ export function Topbar({ children, right, onLogout }: { children?: ReactNode; ri
   const here = window.location.hash;
   const runs = here.startsWith("#/runs");
   const settings = here === "#/settings";
-  const finetune = !runs && !settings;
+  const docs = here.startsWith("#/docs");
+  const finetune = !runs && !settings && !docs;
   return (
     <header className="topbar">
       <a className="brand" href="#/">
-        <IconHammer size={20} aria-hidden /> anvil
+        <IconHammer size={20} aria-hidden /> <span className="brand-name">anvil</span>
       </a>
       <nav className="nav" aria-label="Pages">
         <a href="#/" className={finetune ? "on" : ""} aria-current={finetune ? "page" : undefined}>New run</a>
         <a href="#/runs" className={runs ? "on" : ""} aria-current={runs ? "page" : undefined}>Runs</a>
+        <a href="#/docs" className={docs ? "on" : ""} aria-current={docs ? "page" : undefined}>Docs</a>
       </nav>
       {(children || right) && (
         <div className="topbar-page">

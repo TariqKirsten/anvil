@@ -23,6 +23,8 @@ export function CheckpointSection({ form, update, errors, types }: SectionProps 
     if (!options.some((o) => o.value === c.pickBy)) setC({ pickBy: options[0].value });
   }, [available, c.pickBy]);
   const yesNo = form.trainAs === "decision" && (!types || types.has("noul"));
+  // The default for this data is the first option; the hint names it without its "(every question)" or "(lowest)".
+  const defaultName = options[0].label.replace(/ \(.+\)$/, "");
 
   return (
     <Section title="Checkpoints">
@@ -52,7 +54,9 @@ export function CheckpointSection({ form, update, errors, types }: SectionProps 
         <p className="hint">
           {types ? "Pick best by offers what this data can score." : "Prepare the data to see what it can score."}
           {(!types || types.size > 1) && " Overall averages every question's own score (AUROC for yes/no, macro-F1 for choice, absolute error for score questions), so each question counts the same."}
+          {` Not sure? Use the default, ${defaultName}. Validation loss is for when you'll use the model's probabilities, not just its answers.`}
           {yesNo && ` Catch rate: the share of real yes cases caught when at most ${Number.isFinite(c.falseAlarmPercent) ? c.falseAlarmPercent : 1}% of no cases may be flagged. Keep it low for a guard; raise it where a false alarm costs little.`}
+          {" "}<a href="#/docs">What each score means</a>, and when to use it.
         </p>
       )}
     </Section>

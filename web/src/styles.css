@@ -1489,7 +1489,7 @@ h1 {
 }
 
 /* Too narrow for the runtime badge as well: the GPU badge's tooltip still names it. */
-@media (max-width: 800px) {
+@media (max-width: 860px) {
   .topbar .runtime {
     display: none;
   }
@@ -1588,12 +1588,32 @@ h1 {
   .grid-checkpoints .wide {
     grid-column: auto;
   }
+
+  /* Three pages leave no room for the name as well: the hammer alone links home, and the name stays for screen
+     readers. */
+  .brand-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 
-/* The smallest phones: a little less space between the name, the pages and the icons keeps them on one row. */
+/* The smallest phones: a little less space between the hammer, the pages and the icons, and around each page, keeps
+   them on one row. */
 @media (max-width: 360px) {
   .topbar {
     column-gap: 8px;
+  }
+
+  .nav {
+    gap: 2px;
+  }
+
+  .nav a {
+    padding: 6px 7px;
   }
 }
 
@@ -1875,4 +1895,175 @@ button:disabled {
   overflow: hidden;
   text-align: left;
   text-overflow: ellipsis;
+}
+
+/* ---- the docs (Docs.tsx) */
+
+.doc-lead {
+  margin: 6px 0 0;
+  color: var(--text-2);
+}
+
+.doc-text p {
+  margin: 0 0 12px;
+}
+
+/* "Not sure? Use the default": the advice to take away, set apart from the text around it. */
+.doc-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--accent-bg);
+}
+
+.doc-callout svg {
+  flex: none;
+  margin-top: 3px;
+  color: var(--accent);
+}
+
+.doc-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.doc-table th,
+.doc-table td {
+  padding: 7px 12px 7px 0;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.doc-table th {
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.doc-table th:last-child,
+.doc-table td:last-child {
+  width: 40%;
+  padding-right: 0;
+}
+
+.doc-table tr:last-child td {
+  border-bottom: none;
+}
+
+.doc-table a {
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.doc-table a:hover {
+  text-decoration: underline;
+}
+
+/* One score: its name, the data it needs, then what it is, how it behaves while training, and when to pick it. */
+.doc-score {
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+  scroll-margin-top: 76px; /* clear of the sticky top bar when #/docs/<id> scrolls to it */
+}
+
+.doc-score:first-of-type {
+  padding-top: 0;
+  border-top: none;
+}
+
+.doc-score:last-child {
+  padding-bottom: 0;
+}
+
+.doc-score-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.doc-score h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.doc-score .hint {
+  margin-top: 2px;
+}
+
+.doc-facts {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 8px 16px;
+  margin: 10px 0 0;
+}
+
+.doc-facts dt {
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 21px; /* level with the first line of its text */
+}
+
+.doc-facts dd {
+  margin: 0;
+}
+
+.doc-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.doc-list li + li {
+  margin-top: 8px;
+}
+
+/* The docs on a phone come after the rules above, which they change. Each fact's label goes above its text, and the
+   top bar isn't sticky here, so a part scrolled to needs no room for it. */
+@media (max-width: 640px) {
+  .doc-facts {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .doc-facts dd + dt {
+    margin-top: 8px;
+  }
+
+  .doc-score {
+    scroll-margin-top: 12px;
+  }
+}
+
+/* The guide is too narrow for two columns: each row's pick goes under what it's for. */
+@media (max-width: 400px) {
+  .doc-table thead {
+    display: none;
+  }
+
+  .doc-table tr {
+    display: block;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .doc-table tr:last-child {
+    border-bottom: none;
+  }
+
+  .doc-table td,
+  .doc-table td:last-child {
+    display: block;
+    width: auto;
+    padding: 0;
+    border: none;
+  }
+
+  .doc-table td:last-child::before {
+    content: "→ ";
+    color: var(--muted);
+  }
 }

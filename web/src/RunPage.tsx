@@ -479,6 +479,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
             {has("auroc") && ` Catch rate: the share of real yes cases caught when only ${allowed} of no cases may be flagged. False alarms: the share of no cases flagged at 50%.`}
             {has("mae") && " MAE: how many levels off a score question's answer is, on average."}
             {decision && " Calibration error: how far the confidence is from how often it's right (lower is better)."}
+            {" "}<a href="#/docs">What each score means</a>, and when to pick by it.
           </p>
         </Section>
       )}
