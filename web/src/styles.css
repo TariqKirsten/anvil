@@ -223,6 +223,10 @@ button.link {
   font-size: 12.5px;
 }
 
+.hint + .hint {
+  margin-top: 6px;
+}
+
 .field-error {
   margin: 0;
   color: var(--bad);
@@ -422,6 +426,11 @@ a.brand {
 
 .grid-4 {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.grid-3 + .hint,
+.grid-4 + .hint {
+  margin-top: 14px;
 }
 
 .field {
@@ -1642,4 +1651,38 @@ button:disabled {
   flex: none;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---- each question's scores (QuestionScores.tsx) */
+
+.question-pick {
+  max-width: 420px;
+  margin-bottom: 6px;
+}
+
+.question-group {
+  margin-top: 14px;
+}
+
+.question-group h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.question-group h3 .hint {
+  margin-left: 4px;
+  font-weight: 400;
+}
+
+.table td.few {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.table .question-answers {
+  max-width: 280px;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
 }

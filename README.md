@@ -57,8 +57,9 @@ of a Hugging Face dataset. Its format is recognised from its columns:
 
 **Prepare data** checks every row, removes exact and near-copies (MinHash over word trigrams, 70% shared), drops
 validation or test rows that share an input with train, and cuts whatever split you didn't give from train. Rows that
-share an input stay on one side of the split. The result is cached: preparing the same data with the same settings
-again is instant.
+share an input stay on one side of the split. For decision data it also says which questions the validation set
+asks, by type, since that decides what the checks can score. The result is cached: preparing the same data with the
+same settings again is instant.
 
 ## Training
 
@@ -83,8 +84,17 @@ every validation check, the final test, the checkpoints and the log.
     trained head along. The head is saved as Clef releases ship it (`joint_head_config.json`,
     `joint_head.safetensors`), so Cloudflare's own code loads the result. The prompt holds every question, so give it
     room in Max length.
-  - Validation reports loss, accuracy, AUROC per yes/no question, the catch rate at 1% false alarms, the false alarms
-    at 50%, and the calibration error, the same for both methods, so they can be compared.
+  - Validation scores every question by its type, whatever the dataset names them, the same way for both methods so
+    they can be compared:
+    - yes/no: AUROC, the catch rate (yes cases caught when at most 1% of no cases may be flagged; **False alarms
+      allowed** under Checkpoints changes the 1%), and the false alarms at 50%;
+    - choice: accuracy and macro-F1 (F1 per answer, averaged, so a rare answer counts as much as a common one);
+    - score: exact accuracy and the mean absolute error (how many levels off, on average).
+  - Over all questions: loss, accuracy and calibration error, the averages of each type, and **Overall**: every
+    question's own 0-to-1 score (AUROC, macro-F1, or 1 minus the absolute error over the levels' range), averaged.
+  - The run page has a **By question** table for any check or the final test, with how many rows asked each question
+    and how often each answer came up. An answer seen fewer than 30 times shows in amber: the scores beside it are
+    rough.
 - **Language models** learn chat (only the assistant's replies), prompt and completion (only the completion), or plain
   text.
 - Checkpoints keep the trainable weights and the optimizer, so **Stop** loses at most one step and **Resume** continues
@@ -129,7 +139,10 @@ every validation check, the final test, the checkpoints and the log.
 ### The judge: picking the best checkpoint
 
 - Every checkpoint gets a validation check, and so does the model before training (step 0, shown as the starting
-  point, never picked). **Pick best by** names the number that ranks them; the run page highlights it.
+  point, never picked). **Pick best by** names the number that ranks them; the run page highlights it. It offers what
+  the validation data can score: AUROC and the catch rate need yes/no questions, macro-F1 choice questions, the
+  absolute error score questions, and Overall is there when the data mixes types. Language models are picked by
+  validation loss.
 - If there's a free GPU you didn't tick, a separate process, the judge, does the checks there, so training never
   pauses for them. Without one, training pauses briefly at each checkpoint. If the judge crashes, the trainer takes
   over the checks.
@@ -180,3 +193,6 @@ Built in steps:
    free unticked card.
 6. **The Clef head** (done): decision models the Clef way, next to letters, on one GPU or several, with the judge.
 7. **GGUF export** (done): the finished model or any kept checkpoint, as BF16 to Q4_K_M, for llama.cpp and the like.
+
+Since then: every question scored by its type (yes/no, choice, score) for any dataset, a By question table, Pick best
+by that follows the data (with Overall for mixed data), and the catch rate's false alarm allowance as a setting.

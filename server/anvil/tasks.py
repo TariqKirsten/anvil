@@ -19,6 +19,7 @@ import json
 import math
 import random
 import zlib
+from collections import Counter
 from dataclasses import dataclass
 
 import numpy as np
@@ -111,6 +112,40 @@ def target(question: dict, answer, opts: list[tuple[object, str]]) -> list[float
     return vec
 
 
+def add_answers(questions: dict, name: str, kind: str, lists: dict) -> None:
+    """Add answers to their question's lists, kept by (name, type): a name asked as two types (rare) is two
+    questions."""
+    entry = questions.setdefault((name, kind), {key: [] for key in lists})
+    for key, values in lists.items():
+        entry[key].extend(values)
+
+
+def note(questions: dict, name: str, kind: str, **values) -> None:
+    """One answer: for yes/no, the chance of yes and the gold answer; otherwise the option picked and the gold one."""
+    add_answers(questions, name, kind, {key: [value] for key, value in values.items()})
+
+
+class Decisions:
+    """What the two decision methods share: how their answers are combined and scored."""
+
+    kind = "decision"
+    false_alarm_rate = 0.01  # for the catch rate: the share of no cases that may be flagged (a run setting)
+
+    @staticmethod
+    def combine(parts: list[dict]) -> dict:
+        """Several cards' outputs as one."""
+        out = {"loss": [], "correct": [], "confidence": [], "questions": {}}
+        for part in parts:
+            for key in ("loss", "correct", "confidence"):
+                out[key] += part[key]
+            for (name, kind), answers in part["questions"].items():
+                add_answers(out["questions"], name, kind, answers)
+        return out
+
+    def metrics(self, out: dict, rows: int) -> dict:
+        return decision_metrics(out, rows, self.false_alarm_rate)
+
+
 class NoHead:
     """Tasks that train only the model itself (Clef also trains its head)."""
 
@@ -132,9 +167,7 @@ class Item:
     name: str
 
 
-class DecisionLetters(NoHead):
-    kind = "decision"
-
+class DecisionLetters(Decisions, NoHead):
     def __init__(self, tokenizer, max_length: int, seed: int):
         self.tok = tokenizer
         self.max_length = max_length
@@ -239,7 +272,7 @@ class DecisionLetters(NoHead):
         """The model's answer to each question, ready to be combined with other cards' shares and scored. Every
         question is asked in its own option order and in the reverse order, and the two answers are averaged, so a
         model that favours a letter isn't scored on that."""
-        losses, correct, confidence, yes = [], [], [], {}
+        losses, correct, confidence, questions = [], [], [], {}
         order = sorted(range(len(items)), key=lambda i: len(parsed["state"][items[i].row]))
         for start in range(0, len(order), batch_size):
             chunk = [items[i] for i in order[start:start + batch_size]]
@@ -252,54 +285,100 @@ class DecisionLetters(NoHead):
             picked = probs.masked_fill(~valid, -1)
             correct += (picked.argmax(-1) == targets.argmax(-1)).tolist()
             confidence += picked.max(-1).values.tolist()
-            for it, p, t in zip(chunk, probs, targets):
-                if parsed["questions"][it.row][it.name]["type"] == "noul":
-                    yes.setdefault(it.name, ([], []))
-                    yes[it.name][0].append(float(p[0]))  # option 0 is "yes" in the question's own order
-                    yes[it.name][1].append(bool(t[0] >= 0.5))
-        return {"loss": losses, "correct": correct, "confidence": confidence, "yes": yes}
+            for it, p, t, k in zip(chunk, probs, targets, picked.argmax(-1).tolist()):
+                question = parsed["questions"][it.row][it.name]
+                opts, gold = options(question), int(t.argmax())
+                if question["type"] == "noul":  # option 0 is "yes" in the question's own order
+                    note(questions, it.name, "noul", yes=float(p[0]), gold=bool(t[0] >= 0.5))
+                elif question["type"] == "choice":
+                    note(questions, it.name, "choice", picked=str(opts[k][0]), gold=str(opts[gold][0]))
+                else:  # a score's options are its levels, in order
+                    note(questions, it.name, "score", picked=k, gold=gold, levels=len(opts))
+        return {"loss": losses, "correct": correct, "confidence": confidence, "questions": questions}
 
-    @staticmethod
-    def combine(parts: list[dict]) -> dict:
-        """Several cards' outputs as one."""
-        out = {"loss": [], "correct": [], "confidence": [], "yes": {}}
-        for part in parts:
-            for key in ("loss", "correct", "confidence"):
-                out[key] += part[key]
-            for name, (p, y) in part["yes"].items():
-                mine = out["yes"].setdefault(name, ([], []))
-                mine[0].extend(p)
-                mine[1].extend(y)
-        return out
 
-    @staticmethod
-    def metrics(out: dict, rows: int) -> dict:
-        """
-        - val_loss, accuracy: over all questions
-        - ece: calibration error, how far "80% sure" is from being right 80% of the time (lower is better)
-        - per yes/no question: auroc_<name>, catch_<name> (share of yes caught when at most 1% of no is flagged),
-          and false_alarms_<name> (share of no flagged at a 0.5 cut-off); auroc, catch_rate, false_alarms average them
-        """
-        correct = np.array(out["correct"], dtype=bool)
-        result = {"val_loss": float(np.mean(out["loss"])), "accuracy": float(correct.mean()),
-                  "ece": calibration_error(np.array(out["confidence"]), correct), "rows": rows}
-        per = {"auroc": [], "catch": [], "false_alarms": []}
-        for name, (p, y) in sorted(out["yes"].items()):
-            p, y = np.array(p), np.array(y)
-            value = auroc(p, y)
-            if value is None:
-                continue
-            caught = catch_rate(p, y, 0.01)
-            alarms = float((p[~y] >= 0.5).mean())
-            result[f"auroc_{name}"], result[f"catch_{name}"], result[f"false_alarms_{name}"] = value, caught, alarms
-            per["auroc"].append(value)
-            per["catch"].append(caught)
-            per["false_alarms"].append(alarms)
-        if per["auroc"]:
-            result["auroc"] = float(np.mean(per["auroc"]))
-            result["catch_rate"] = float(np.mean(per["catch"]))
-            result["false_alarms"] = float(np.mean(per["false_alarms"]))
-        return result
+def decision_metrics(out: dict, rows: int, false_alarm_rate: float) -> dict:
+    """
+    Over all questions: val_loss, accuracy, and ece (calibration error: how far "80% sure" is from being right 80% of
+    the time; lower is better).
+
+    Each question by its type, in "questions", with how many rows asked it and how often each answer was the gold one:
+    - yes/no: auroc; catch_rate, the share of yes caught when at most false_alarm_rate of the no cases are flagged; and
+      false_alarms, the share of no cases flagged at a 0.5 cut-off
+    - choice: accuracy, and macro_f1 (F1 per answer, averaged, so a rare answer counts as much as a common one)
+    - score: accuracy (the exact level), and mae (how many levels off, on average)
+
+    auroc, catch_rate, false_alarms, macro_f1 and mae average them over the questions of their type. overall averages
+    a 0-to-1 quality over every question: its AUROC, its macro-F1, or 1 - its MAE / (levels - 1).
+    """
+    correct = np.array(out["correct"], dtype=bool)
+    result = {"val_loss": float(np.mean(out["loss"])), "accuracy": float(correct.mean()),
+              "ece": calibration_error(np.array(out["confidence"]), correct), "rows": rows}
+    scored, quality = {}, []
+    types_of = Counter(name for name, _ in out["questions"])
+    for (name, kind), answers in sorted(out["questions"].items()):
+        label = name if types_of[name] == 1 else f"{name} ({kind})"
+        scored[label], value = SCORE_BY_TYPE[kind](answers, false_alarm_rate)
+        if value is not None:
+            quality.append(value)
+    for kind, key in (("noul", "auroc"), ("noul", "catch_rate"), ("noul", "false_alarms"), ("choice", "macro_f1"),
+                      ("score", "mae")):
+        values = [s[key] for s in scored.values() if s["type"] == kind and key in s]
+        if values:
+            result[key] = float(np.mean(values))
+    if quality:
+        result["overall"] = float(np.mean(quality))
+    result["questions"] = scored
+    return result
+
+
+def _counts(values: list, by_count: bool) -> dict:
+    """How often each answer is the gold one: the most common first, or in order (a score's levels)."""
+    found = Counter(values)
+    keys = [k for k, _ in found.most_common()] if by_count else sorted(found)
+    return {str(k): found[k] for k in keys}
+
+
+def _score_yes_no(answers: dict, false_alarm_rate: float) -> tuple[dict, float | None]:
+    p, y = np.array(answers["yes"], dtype=float), np.array(answers["gold"], dtype=bool)
+    scored = {"type": "noul", "rows": len(y), "answers": {"yes": int(y.sum()), "no": int((~y).sum())}}
+    value = auroc(p, y)
+    if value is not None:  # needs both answers among the gold ones
+        scored.update(auroc=value, catch_rate=catch_rate(p, y, false_alarm_rate),
+                      false_alarms=float((p[~y] >= 0.5).mean()))
+    return scored, value
+
+
+def _score_choice(answers: dict, false_alarm_rate: float) -> tuple[dict, float]:
+    picked, gold = answers["picked"], answers["gold"]
+    f1 = macro_f1(picked, gold)
+    return {"type": "choice", "rows": len(gold), "answers": _counts(gold, by_count=True),
+            "accuracy": float(np.mean([p == g for p, g in zip(picked, gold)])), "macro_f1": f1}, f1
+
+
+def _score_level(answers: dict, false_alarm_rate: float) -> tuple[dict, float | None]:
+    picked, gold, levels = (np.array(answers[k], dtype=float) for k in ("picked", "gold", "levels"))
+    off = np.abs(picked - gold)
+    spread = levels > 1  # a question with a single level can't be off
+    quality = float(1 - (off[spread] / (levels[spread] - 1)).mean()) if spread.any() else None
+    return {"type": "score", "rows": len(gold), "answers": _counts([int(g) for g in gold], by_count=False),
+            "accuracy": float((off == 0).mean()), "mae": float(off.mean())}, quality
+
+
+SCORE_BY_TYPE = {"noul": _score_yes_no, "choice": _score_choice, "score": _score_level}
+
+
+def macro_f1(picked: list, gold: list) -> float:
+    """F1 for each answer that was the gold one or was picked, averaged: each counts the same, however rare. F1 is
+    2·hits / (2·hits + wrongly picked + missed)."""
+    picked, gold = np.array(picked, dtype=object), np.array(gold, dtype=object)
+    scores = []
+    for answer in set(gold.tolist()) | set(picked.tolist()):
+        hits = int(((picked == answer) & (gold == answer)).sum())
+        wrong = int(((picked == answer) & (gold != answer)).sum())
+        missed = int(((picked != answer) & (gold == answer)).sum())
+        scores.append(2 * hits / (2 * hits + wrong + missed))
+    return float(np.mean(scores))
 
 
 def catch_rate(scores: np.ndarray, labels: np.ndarray, false_alarm_rate: float) -> float:
@@ -461,13 +540,11 @@ def clef_target(question: dict, answer, option_ids: tuple[str, ...]) -> list[flo
     return target(question, answer, [(k, "") for k in keys])
 
 
-class DecisionClef:
+class DecisionClef(Decisions):
     """Each row (its state and every question with its allowed options) becomes one prompt, built by Clef's own
     encode_record. The head reads the model's hidden states over each question and option, and the option words'
     output embeddings, and gives one score per option. The loss is cross-entropy against the gold answer, averaged over
     questions. An item is a row, since one pass answers all of its questions."""
-
-    kind = "decision"
 
     def __init__(self, tokenizer, max_length: int, head: torch.nn.Module, config: dict):
         from .vendor.clef import joint_schema_model as clef
@@ -566,7 +643,8 @@ class DecisionClef:
 
     @torch.no_grad()
     def outputs(self, model, items: list[int], parsed: dict, batch_size: int, autocast) -> dict:
-        losses, correct, confidence, yes = [], [], [], {}
+        losses, correct, confidence, questions = [], [], [], {}
+        kinds = {number: name for name, number in self.clef.QUESTION_TYPES.items()}
         order = sorted(items, key=lambda i: len(self.clef.render(parsed["state"][i])))
         for start in range(0, len(order), batch_size):
             batch = self.collate(order[start:start + batch_size], parsed)
@@ -578,18 +656,20 @@ class DecisionClef:
                     losses.append(float(-(t * torch.log(p.clamp_min(1e-9))).sum()))
                     correct.append(bool(p.argmax() == t.argmax()))
                     confidence.append(float(p.max()))
-                    if question.question_type == self.clef.QUESTION_TYPES["noul"]:  # option 0 is "true"
-                        yes.setdefault(question.question_id, ([], []))
-                        yes[question.question_id][0].append(float(p[0]))
-                        yes[question.question_id][1].append(bool(t[0] >= 0.5))
-        return {"loss": losses, "correct": correct, "confidence": confidence, "yes": yes}
+                    kind, ids = kinds[question.question_type], question.option_ids
+                    k, gold = int(p.argmax()), int(t.argmax())
+                    if kind == "noul":  # option 0 is "true"
+                        note(questions, question.question_id, kind, yes=float(p[0]), gold=bool(t[0] >= 0.5))
+                    elif kind == "choice":
+                        note(questions, question.question_id, kind, picked=ids[k], gold=ids[gold])
+                    else:  # a score's options are its levels, "0", "1", ...
+                        note(questions, question.question_id, kind, picked=int(ids[k]), gold=int(ids[gold]),
+                             levels=len(ids))
+        return {"loss": losses, "correct": correct, "confidence": confidence, "questions": questions}
 
-    combine = staticmethod(DecisionLetters.combine)
-
-    @staticmethod
-    def metrics(out: dict, rows: int) -> dict:
+    def metrics(self, out: dict, rows: int) -> dict:
         # rows: the questions scored, like the letters way (a row with several questions counts several times)
-        return DecisionLetters.metrics(out, len(out["loss"]))
+        return decision_metrics(out, len(out["loss"]), self.false_alarm_rate)
 
 
 def length_grouped_batches(lengths: np.ndarray, batch_size: int, rng: random.Random, chunk: int = 4096) -> list[list[int]]:

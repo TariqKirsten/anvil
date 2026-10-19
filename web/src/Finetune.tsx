@@ -119,7 +119,8 @@ export function Finetune({ onLogout }: { onLogout: () => void }) {
         trainItems={!prepared ? null
           : form.trainAs === "decision" && form.decisionMethod === "letters" ? (prepared.items?.train ?? prepared.rows.train)
           : prepared.rows.train} />
-      <CheckpointSection {...props} />
+      <CheckpointSection {...props}
+        types={prepared?.questions ? new Set(Object.values(prepared.questions).map((q) => q.type)) : null} />
 
       <footer className="footer">
         {outcome && (

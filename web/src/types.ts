@@ -109,6 +109,8 @@ export interface PrepareReport {
   leaks: Partial<Record<Slot, number>>;
   // Decision data: the questions in train, which is what a training step's batch counts (rows can hold several).
   items?: { train: number };
+  // Decision data: each question the validation set asks, its type and how many rows ask it.
+  questions?: Record<string, { type: QuestionType; rows: number }>;
   given: { validation: boolean; test: boolean };
   notes: string[];
   seconds: number;
@@ -126,6 +128,28 @@ export interface PrepareJob {
 
 // ---- runs
 
+export type QuestionType = "noul" | "choice" | "score";
+
+// One question's scores at a check (server/anvil/tasks.py, decision_metrics). answers: how often each answer was the
+// gold one ("yes" and "no", a choice's keys, a score's levels). Runs from before these were kept have AUROC, catch
+// rate and false alarms only.
+export interface QuestionScore {
+  type: QuestionType;
+  rows?: number;
+  answers?: Record<string, number>;
+  auroc?: number;
+  catch_rate?: number;
+  false_alarms?: number;
+  accuracy?: number;
+  macro_f1?: number;
+  mae?: number;
+}
+
+// A check's scores: numbers by name, and each question's own under "questions".
+export type Scores = { [key: string]: number | string | Record<string, QuestionScore> | undefined } & {
+  questions?: Record<string, QuestionScore>;
+};
+
 export type RunState = "starting" | "loading" | "running" | "saving" | "done" | "failed" | "stopped";
 
 export interface RunSummary {
@@ -142,7 +166,7 @@ export interface RunSummary {
   step: number;
   total: number | null;
   updated: number | null;
-  last_eval: Record<string, number> | null;
+  last_eval: Scores | null;
   error: string | null;
   best: Leaderboard["entries"][number] | null;
   size: number; // bytes on disk
@@ -170,18 +194,17 @@ export interface RunStatus {
   head_m?: number; // Clef's head, in millions of parameters
   head_first?: number; // steps the new head trains alone
   trainable_m?: number;
-  last_eval?: Record<string, number>;
+  last_eval?: Scores;
   best_step?: number | null;
   early_stop?: string | null;
-  final_test?: ({ step: number } & Record<string, number>) | null;
+  final_test?: (Scores & { step: number; rows?: number }) | null;
   training_finished?: boolean;
 }
 
-export interface RunMetric {
+export type RunMetric = Scores & {
   type: "train" | "eval" | "resume" | "test" | "early_stop";
   step: number;
-  [key: string]: number | string;
-}
+};
 
 export interface RunDetail {
   config: {
@@ -195,7 +218,7 @@ export interface RunDetail {
     gpus?: number[];
     judge_gpu?: number | null;
     hyper: Record<string, number | string | boolean>;
-    checkpoints: { every: number; keepBest: number; patience: number; pickBy: string };
+    checkpoints: { every: number; keepBest: number; patience: number; pickBy: string; falseAlarmPercent?: number };
     created: number;
   };
   status: RunStatus;

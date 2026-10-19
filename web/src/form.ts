@@ -1,7 +1,7 @@
 // Everything the fine-tuning screen asks for, its defaults, and the checks it must pass before a run can start.
 // The form is kept in this browser's localStorage, so a reload doesn't lose it.
 
-import type { DataSource } from "./types";
+import type { DataSource, QuestionType } from "./types";
 
 export type TrainAs = "lm" | "decision";
 
@@ -43,7 +43,8 @@ export interface FormState {
     gradCheckpointing: boolean;
     maxSteps: number;
   };
-  checkpoints: { every: number; keepBest: number; patience: number; pickBy: string };
+  // falseAlarmPercent: the catch rate counts the yes cases caught when at most this share of no cases is flagged.
+  checkpoints: { every: number; keepBest: number; patience: number; pickBy: string; falseAlarmPercent: number };
 }
 
 // What each section gets: the form, and one way to change it.
@@ -53,17 +54,24 @@ export interface SectionProps {
   errors: Errors;
 }
 
-// The same names as server/anvil/picking.py.
-export const PICK_BY: Record<TrainAs, { value: string; label: string }[]> = {
-  decision: [
-    { value: "auroc", label: "Mean AUROC" },
-    { value: "catch_rate", label: "Catch rate at 1% false alarms" },
-    { value: "calibration", label: "Calibration (lowest error)" },
-    { value: "accuracy", label: "Accuracy" },
-    { value: "val_loss", label: "Validation loss" },
-  ],
-  lm: [{ value: "val_loss", label: "Validation loss" }],
-};
+// What "pick best by" can rank checks by (the same names as server/anvil/picking.py), for the question types the
+// validation data has (null: not known yet, so every one). Overall is offered when the data mixes types; with one
+// type it would be that type's own average.
+export function pickByOptions(trainAs: TrainAs, types: Set<QuestionType> | null, falseAlarmPercent: number) {
+  if (trainAs === "lm") return [{ value: "val_loss", label: "Validation loss" }];
+  const has = (t: QuestionType) => !types || types.has(t);
+  const allowed = Number.isFinite(falseAlarmPercent) ? `${falseAlarmPercent}%` : "1%";
+  return [
+    { value: "overall", label: "Overall (every question)", show: !types || types.size > 1 },
+    { value: "auroc", label: "Mean AUROC", show: has("noul") },
+    { value: "catch_rate", label: `Catch rate at ${allowed} false alarms`, show: has("noul") },
+    { value: "macro_f1", label: "Mean macro-F1", show: has("choice") },
+    { value: "mae", label: "Mean absolute error (lowest)", show: has("score") },
+    { value: "calibration", label: "Calibration (lowest error)", show: true },
+    { value: "accuracy", label: "Accuracy", show: true },
+    { value: "val_loss", label: "Validation loss", show: true },
+  ].filter((o) => o.show).map(({ value, label }) => ({ value, label }));
+}
 
 // The model's learning rate that suits each way of training. Clef from a plain model learned nothing at letters'
 // 2e-4 (the model's features moved faster than the new head could follow); 5e-5 worked.
@@ -114,7 +122,7 @@ export const DEFAULTS: FormState = {
     gradCheckpointing: true,
     maxSteps: 0,
   },
-  checkpoints: { every: 500, keepBest: 3, patience: 3, pickBy: "auroc" },
+  checkpoints: { every: 500, keepBest: 3, patience: 3, pickBy: "overall", falseAlarmPercent: 1 },
 };
 
 const KEY = "anvil.finetune.v1";
@@ -199,6 +207,8 @@ export function validate(form: FormState): Errors {
   if (!wholeNumber(c.every, 10, 1_000_000)) errors.every = "Use at least 10 steps.";
   if (!wholeNumber(c.keepBest, 1, 100)) errors.keepBest = "Use 1 to 100.";
   if (!wholeNumber(c.patience, 0, 1000)) errors.patience = "Use 0 (never stop early) or a whole number.";
+  if (form.trainAs === "decision" && !(c.falseAlarmPercent >= 0 && c.falseAlarmPercent <= 50))
+    errors.falseAlarmPercent = "Use 0 to 50%.";
   if (!form.name.trim()) errors.name = "Give the run a name.";
   return errors;
 }

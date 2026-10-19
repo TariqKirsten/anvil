@@ -118,7 +118,8 @@ def test_a_decision_run_trains_checkpoints_and_saves(tmp_path, tiny_model):
     lines = metrics(run_dir)
     evals = [m for m in lines if m["type"] == "eval"]
     assert [m["step"] for m in evals] == [0, 3, 6]
-    assert {"val_loss", "accuracy", "auroc"} <= set(evals[-1])
+    assert {"val_loss", "accuracy", "auroc", "macro_f1", "overall"} <= set(evals[-1])
+    assert {name: q["type"] for name, q in evals[-1]["questions"].items()} == {"rude": "noul", "kind": "choice"}
     assert all(np.isfinite(m["loss"]) for m in lines if m["type"] == "train")
     assert sorted(p.name for p in (run_dir / "checkpoints").iterdir()) == ["step-0000003", "step-0000006"]
     assert (run_dir / "model" / "adapter" / "adapter_config.json").exists()
@@ -403,7 +404,14 @@ def test_picking_rules():
         loss_board = picking.record(loss_board, step, {"val_loss": loss}, "val_loss")
     assert loss_board["best_step"] == 20  # lower is better for losses
     no_auroc = picking.record({"entries": [], "best_step": None, "since_best": 0}, 10, {"val_loss": 0.3}, "auroc")
-    assert no_auroc["entries"][0]["metric"] == "val_loss"  # falls back when the data has no yes/no questions
+    assert no_auroc["entries"][0]["metric"] == "val_loss"  # falls back when no yes/no question could be scored
+    mae_board = {"entries": [], "best_step": None, "since_best": 0}
+    for step, mae in [(10, 0.6), (20, 0.3), (30, 0.4)]:
+        mae_board = picking.record(mae_board, step, {"mae": mae, "val_loss": 1.0}, "mae")
+    assert mae_board["best_step"] == 20  # fewer levels off is better
+    assert picking.problem("overall", {"noul"}) is None and picking.problem("auroc", None) is None
+    assert "needs choice questions" in picking.problem("macro_f1", {"noul", "score"})
+    assert "Unknown" in picking.problem("vibes", {"noul"})
 
 
 def test_catch_rate_and_calibration():

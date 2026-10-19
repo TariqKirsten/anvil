@@ -71,7 +71,8 @@ class Reporter:
     def metric(self, entry: dict) -> None:
         self.metrics.write(json.dumps(entry) + "\n")
         self.metrics.flush()
-        print(" ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in entry.items()), flush=True)
+        print(" ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in entry.items()
+                       if not isinstance(v, dict)), flush=True)  # each question's scores are for the screen
 
     def fail(self, message: str) -> None:
         self.update(state="failed", stage="Failed", error=message, eta_s=None)
@@ -198,12 +199,20 @@ def make_task(cfg: dict, tok, model=None, device=None):
     from . import tasks
 
     h = cfg["hyper"]
-    if cfg["train_as"] == "decision" and cfg["method"] == "clef":
+    if cfg["train_as"] != "decision":
+        return tasks.LanguageModel(tok, cfg["data"]["format"], int(h["maxLength"]))
+    if cfg["method"] == "clef":
         head, config = clef_head(cfg, model, device)
-        return tasks.DecisionClef(tok, int(h["maxLength"]), head, config)
-    if cfg["train_as"] == "decision":
-        return tasks.DecisionLetters(tok, int(h["maxLength"]), int(h["seed"]))
-    return tasks.LanguageModel(tok, cfg["data"]["format"], int(h["maxLength"]))
+        task = tasks.DecisionClef(tok, int(h["maxLength"]), head, config)
+    else:
+        task = tasks.DecisionLetters(tok, int(h["maxLength"]), int(h["seed"]))
+    task.false_alarm_rate = false_alarm_rate(cfg)
+    return task
+
+
+def false_alarm_rate(cfg: dict) -> float:
+    """The catch rate's allowance: the share of no cases that may be flagged (the form's percent; 1% before it had one)."""
+    return float(cfg["checkpoints"].get("falseAlarmPercent", 1)) / 100
 
 
 def clef_release(cfg: dict) -> Path | None:

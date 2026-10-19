@@ -346,7 +346,19 @@ function Summary({ report }: { report: PrepareReport }) {
             list.slice(0, 3).map((p) => <li key={`${slot}-${p.row}`}>{slot} row {p.row + 1}: {p.reason}</li>))}
         </ul>
       )}
+      {report.questions && <p className="hint">{askedLine(report.questions)}</p>}
       {report.notes.map((n) => <p key={n} className="hint">{n}</p>)}
     </div>
   );
+}
+
+// "Validation asks 8 questions: 5 yes/no, 2 choice and 1 score."
+function askedLine(questions: NonNullable<PrepareReport["questions"]>) {
+  const all = Object.values(questions);
+  const parts = ([["noul", "yes/no"], ["choice", "choice"], ["score", "score"]] as const)
+    .map(([type, name]) => [all.filter((q) => q.type === type).length, name] as const)
+    .filter(([n]) => n > 0)
+    .map(([n, name]) => `${n} ${name}`);
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0];
+  return `Validation asks ${all.length === 1 ? "1 question" : `${all.length} questions`}: ${list}.`;
 }

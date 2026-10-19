@@ -1,4 +1,4 @@
-import { PICK_BY, withMethod, type FormState, type SectionProps } from "../form";
+import { pickByOptions, withMethod, type FormState, type SectionProps } from "../form";
 import { Field, Section, Segmented } from "../ui";
 
 const METHOD_HINTS = {
@@ -20,7 +20,11 @@ export function TrainAs({ form, update }: SectionProps) {
           { value: "decision", label: "Decision model" },
         ]}
         onChange={(trainAs) =>
-          update((f) => ({ ...withMethod(f, { trainAs }), checkpoints: { ...f.checkpoints, pickBy: PICK_BY[trainAs][0].value } }))
+          update((f) => ({
+            ...withMethod(f, { trainAs }),
+            // the first that suits; Checkpoints moves it on if the prepared data can't score it
+            checkpoints: { ...f.checkpoints, pickBy: pickByOptions(trainAs, null, f.checkpoints.falseAlarmPercent)[0].value },
+          }))
         }
       />
       <div className="row">

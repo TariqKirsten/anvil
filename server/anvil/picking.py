@@ -14,17 +14,35 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
-# setting -> (metric in the validation results, direction, label)
+# setting -> (metric in the validation results, direction, label); anvil.tasks.decision_metrics says what they are
 PICK_BY = {
+    "overall": ("overall", "max", "Overall score"),
     "auroc": ("auroc", "max", "Mean AUROC"),
-    "catch_rate": ("catch_rate", "max", "Catch rate at 1% false alarms"),
+    "catch_rate": ("catch_rate", "max", "Catch rate"),
+    "macro_f1": ("macro_f1", "max", "Mean macro-F1"),
+    "mae": ("mae", "min", "Mean absolute error"),
     "calibration": ("ece", "min", "Calibration error"),
     "accuracy": ("accuracy", "max", "Accuracy"),
     "val_loss": ("val_loss", "min", "Validation loss"),
 }
+# The question type a setting needs in the validation data; the others work for any decision data.
+NEEDS = {"auroc": "noul", "catch_rate": "noul", "macro_f1": "choice", "mae": "score"}
+TYPE_NAMES = {"noul": "yes/no", "choice": "choice", "score": "score"}
 
 
 LABELS = {key: label for key, _, label in PICK_BY.values()}  # metric -> label
+
+
+def problem(pick_by: str, types: set[str] | None) -> str | None:
+    """Why a decision run can't be picked by this setting, or None if it can. types: the question types in its
+    validation data (None when that isn't known)."""
+    if pick_by not in PICK_BY:
+        return f"Unknown \"pick best by\" setting: {pick_by}."
+    need = NEEDS.get(pick_by)
+    if need and types is not None and need not in types:
+        return (f"{PICK_BY[pick_by][2]} needs {TYPE_NAMES[need]} questions, and the validation data has none. "
+                "Pick best by something else.")
+    return None
 
 
 def metric_of(pick_by: str) -> tuple[str, str]:
@@ -35,7 +53,7 @@ def metric_of(pick_by: str) -> tuple[str, str]:
 def score(metrics: dict, pick_by: str) -> float | None:
     key, _ = metric_of(pick_by)
     value = metrics.get(key)
-    if value is None and key != "val_loss":  # e.g. no yes/no questions, so no AUROC: fall back to the loss
+    if value is None and key != "val_loss":  # e.g. no yes/no question had both answers: fall back to the loss
         return None
     return value
 

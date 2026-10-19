@@ -7,6 +7,7 @@ import { api } from "./api";
 import { Chart } from "./Chart";
 import { ExportSection } from "./ExportSection";
 import { bytes } from "./format";
+import { QuestionScores, questionsOf, type ScoredCheck } from "./QuestionScores";
 import { METRIC_LABEL, STATE_LABEL, stateTone, when } from "./Runs";
 import { Topbar } from "./Topbar";
 import type { RunDetail, RunMetric } from "./types";
@@ -16,12 +17,18 @@ const ACTIVE = new Set(["starting", "loading", "running", "saving"]);
 
 // The "pick best by" setting -> the validation number it ranks by (server/anvil/picking.py).
 const PICK_METRIC: Record<string, string> = {
+  overall: "overall",
   auroc: "auroc",
   catch_rate: "catch_rate",
+  macro_f1: "macro_f1",
+  mae: "mae",
   calibration: "ece",
   accuracy: "accuracy",
   val_loss: "val_loss",
 };
+
+// The averages a check has for each question type it scored: yes/no, choice and score questions.
+const TYPE_MEANS = ["auroc", "macro_f1", "mae"];
 
 function stepOf(checkpoint: string) {
   return Number(checkpoint.replace("step-", ""));
@@ -152,22 +159,39 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   const epoch = epochLine(st);
   const pct = st.total ? Math.min(100, (st.step / st.total) * 100) : 0;
   const elapsed = st.started ? (st.finished ?? st.stopped ?? (ACTIVE.has(st.state) ? Date.now() / 1000 : st.started)) - st.started : null;
-  const columns: [string, string, string][] = decision
+  const allowed = `${cfg.checkpoints.falseAlarmPercent ?? 1}%`; // the catch rate's false alarms
+  const has = (key: string) => evals.some((m) => typeof m[key] === "number");
+  // Overall is worth a column when the data mixes question types; with one type it's that type's average.
+  const mixed = (scores: Record<string, unknown>[]) =>
+    TYPE_MEANS.filter((k) => scores.some((m) => typeof m[k] === "number")).length > 1;
+  const columns: [string, string, string][] = [["val_loss", "Val loss", "Validation loss"]];
+  if (decision) {
+    columns.push(["accuracy", "Accuracy", "Share of questions answered right"]);
+    if (mixed(evals) || metric === "overall")
+      columns.push(["overall", "Overall", "Every question's own score, averaged: AUROC for yes/no, macro-F1 for choice, and 1 minus the absolute error over the levels' range for score questions"]);
+    if (has("auroc"))
+      columns.push(["auroc", "Mean AUROC", "Mean AUROC over the yes/no questions"],
+        ["catch_rate", "Catch rate", `Real yes cases caught when only ${allowed} of no cases may be flagged`],
+        ["false_alarms", "False alarms", "Share of no cases flagged at 50%"]);
+    if (has("macro_f1")) columns.push(["macro_f1", "Macro-F1", "Mean macro-F1 over the choice questions"]);
+    if (has("mae"))
+      columns.push(["mae", "MAE", "Mean absolute error over the score questions: levels off, on average (lower is better)"]);
+    columns.push(["ece", "Calib. error", "Calibration error: confidence vs how often it's right (lower is better)"]);
+  } else {
+    columns.push(["perplexity", "Perplexity", "e to the validation loss"]);
+  }
+  // Each question's scores: at the final test, and at every check, newest first.
+  const scored: ScoredCheck[] = decision
     ? [
-        ["val_loss", "Val loss", "Validation loss"],
-        ["accuracy", "Accuracy", "Share of questions answered right"],
-        ["auroc", "Mean AUROC", "Mean AUROC over the yes/no questions"],
-        ["catch_rate", "Catch rate", "Real yes cases caught when only 1% of no cases may be flagged"],
-        ["false_alarms", "False alarms", "Share of no cases flagged at 50%"],
-        ["ece", "Calib. error", "Calibration error: confidence vs how often it's right (lower is better)"],
-      ]
-    : [
-        ["val_loss", "Val loss", "Validation loss"],
-        ["perplexity", "Perplexity", "e to the validation loss"],
-      ];
-  const perQuestion = decision && evals.length
-    ? Object.keys(evals[evals.length - 1]).filter((k) => k.startsWith("auroc_")).map((k) => k.slice(6))
+        ...(test ? [{ key: "test", label: `Final test · step ${test.step.toLocaleString()}`, scores: test }] : []),
+        ...[...evals].reverse().map((m) => ({
+          key: `step-${m.step}`,
+          label: `Validation · step ${m.step === 0 ? "0 (before training)" : m.step.toLocaleString()}${m.step === best ? " · best" : ""}`,
+          scores: m,
+        })),
+      ].filter((c) => questionsOf(c.scores))
     : [];
+  const preferred = test ? "test" : best != null ? `step-${best}` : evals.length ? `step-${evals[evals.length - 1].step}` : "";
 
   return (
     <div className="page">
@@ -297,21 +321,28 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
         <Section title="Final test">
           <div className="stats">
             {(decision
-              ? [["Accuracy", test.accuracy], ["Mean AUROC", test.auroc], ["Catch rate at 1% false alarms", test.catch_rate],
-                 ["False alarms", test.false_alarms], ["Calibration error", test.ece]]
+              ? [...(mixed([test]) || metric === "overall" ? [["Overall", test.overall]] : []),
+                 ["Accuracy", test.accuracy], ["Mean AUROC", test.auroc],
+                 [`Catch rate at ${allowed} false alarms`, test.catch_rate], ["False alarms", test.false_alarms],
+                 ["Mean macro-F1", test.macro_f1], ["Mean absolute error", test.mae], ["Calibration error", test.ece]]
               : [["Test loss", test.val_loss], ["Perplexity", test.perplexity]]
             ).filter(([, v]) => typeof v === "number").map(([label, v]) => (
               <div key={label as string}>
-                <span className="stat-label">{label}</span>
+                <span className="stat-label">{label as string}</span>
                 <span className="stat-value">{num(v, label === "Perplexity" ? 2 : 3)}</span>
               </div>
             ))}
           </div>
           <p className="hint">
-            The step {test.step.toLocaleString()} checkpoint on {test.rows?.toLocaleString()} rows of the test set. The
-            test set played no part in picking it, so this is the fair number to quote.
+            The step {test.step.toLocaleString()} checkpoint on {test.rows?.toLocaleString()}{" "}
+            {decision ? "questions" : "rows"} from the test set. The test set played no part in picking it, so this is
+            the fair number to quote.{decision && " Each question's scores are under By question."}
           </p>
         </Section>
+      )}
+
+      {scored.length > 0 && (
+        <QuestionScores checks={scored} preferred={preferred} falseAlarmPercent={cfg.checkpoints.falseAlarmPercent ?? 1} />
       )}
 
       {evals.length > 0 && (
@@ -324,7 +355,6 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
                   {columns.map(([key, label, title]) => (
                     <th key={key} title={title} className={key === metric ? "picked" : undefined}>{label}</th>
                   ))}
-                  {perQuestion.map((q) => <th key={q} title={`AUROC for ${q}`}>{q}</th>)}
                 </tr>
               </thead>
               <tbody>
@@ -337,16 +367,18 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
                     {columns.map(([key]) => (
                       <td key={key} className={key === metric ? "picked" : undefined}>{num(m[key], key === "perplexity" ? 2 : 3)}</td>
                     ))}
-                    {perQuestion.map((q) => <td key={q}>{num(m[`auroc_${q}`])}</td>)}
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
           <p className="hint">
-            Up to 2,000 rows of the validation set; yes/no questions are asked both ways round and averaged. The
+            Up to 2,000 rows of the validation set{decision && cfg.method !== "clef" && "; every question is asked with its options in both orders and averaged"}. The
             highlighted column picks the best checkpoint.
-            {decision && " Catch rate: the share of real yes cases caught when only 1 in 100 no cases may be flagged. False alarms: the share of no cases flagged at 50%. Calibration error: how far the confidence is from how often it's right (lower is better)."}
+            {decision && " The averages are over the questions of each type; By question has each one's own."}
+            {has("auroc") && ` Catch rate: the share of real yes cases caught when only ${allowed} of no cases may be flagged. False alarms: the share of no cases flagged at 50%.`}
+            {has("mae") && " MAE: how many levels off a score question's answer is, on average."}
+            {decision && " Calibration error: how far the confidence is from how often it's right (lower is better)."}
           </p>
         </Section>
       )}

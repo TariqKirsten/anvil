@@ -160,6 +160,24 @@ def _check_hyper(h: dict) -> None:
         raise ValueError("Max steps can't be negative.")
 
 
+def _check_picking(checkpoints: dict, train_as: str, report: dict) -> dict:
+    """The checkpoint settings, once "pick best by" is known to work for the data (a language model is always picked
+    by its validation loss) and the catch rate's false alarm allowance is a sensible percent."""
+    checkpoints = dict(checkpoints)
+    if train_as == "lm":
+        checkpoints["pickBy"] = "val_loss"
+        return checkpoints
+    questions = report.get("questions")  # missing from data prepared before reports listed them: not known
+    types = {q["type"] for q in questions.values()} if questions is not None else None
+    reason = picking.problem(checkpoints.get("pickBy", "val_loss"), types)
+    if reason:
+        raise ValueError(reason)
+    percent = checkpoints.get("falseAlarmPercent", 1)
+    if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not 0 <= percent <= 50:
+        raise ValueError("The false alarms allowed for the catch rate must be 0 to 50%.")
+    return checkpoints
+
+
 def create(form: dict, prepare: dict, token: str | None) -> str:
     train_as = form["trainAs"]
     method = form["decisionMethod"] if train_as == "decision" else form["lmFormat"]
@@ -178,6 +196,7 @@ def create(form: dict, prepare: dict, token: str | None) -> str:
         raise ValueError("A language model needs chat, prompt and completion, or text data, not decision data.")
     if train_as == "lm":
         method = fmt  # for language models the data decides: chat, prompt and completion, or plain text
+    checkpoints = _check_picking(form["checkpoints"], train_as, job.report)
 
     train_gpus, judge_gpu = _choose_gpus(form.get("gpus"), form.get("spareChecks", True) is not False)
     run_id = _new_id(form.get("name") or "run")
@@ -196,7 +215,7 @@ def create(form: dict, prepare: dict, token: str | None) -> str:
         "gpu": train_gpus[0],
         "judge_gpu": judge_gpu,
         "hyper": form["hyper"],
-        "checkpoints": form["checkpoints"],
+        "checkpoints": checkpoints,
         "created": time.time(),
     }
     _write(path / "config.json", cfg)

@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import numbers
+import os
 import threading
 import time
 import uuid
@@ -460,6 +461,8 @@ def prepare(request: dict, token: str | None, out_dir: Path, progress: Progress 
         report["rows"][name] = int(len(rows))
     if fmt == "decision":  # a decision model trains on (row, question) pairs, so these are what a step's batch counts
         report["items"] = {"train": int(sum(len(_value(q)) for q in frames["train"]["questions"].iloc[cut["train"]]))}
+        frame, rows = chosen["validation"] if len(chosen["validation"][1]) else chosen["train"]
+        report["questions"] = question_summary(frame["questions"].iloc[rows])
     report["given"] = {name: name in parsed for name in ("validation", "test")}
     report["seconds"] = round(time.time() - started, 1)
     (out_dir / "request.json").write_text(json.dumps(
@@ -578,9 +581,29 @@ def _run(job: Job, request: dict, token: str | None) -> None:
         job.state, job.error = "failed", str(error) or error.__class__.__name__
 
 
+def question_summary(questions) -> dict:
+    """{name: {type, rows}} for each question asked in these rows: what the validation checks will score."""
+    found: dict = {}
+    for value in questions:
+        for name, question in _value(value).items():
+            found.setdefault(name, {"type": question["type"], "rows": 0})["rows"] += 1
+    return dict(sorted(found.items()))
+
+
 def cached(fp: str) -> dict | None:
-    path = config.settings.prepared / fp / "report.json"
-    return json.loads(path.read_text()) if path.is_file() else None
+    folder = config.settings.prepared / fp
+    path = folder / "report.json"
+    if not path.is_file():
+        return None
+    report = json.loads(path.read_text())
+    if report.get("format") == "decision" and "questions" not in report:  # prepared before reports listed them
+        split = "validation" if report["rows"].get("validation") else "train"
+        report["questions"] = question_summary(pd.read_parquet(folder / f"{split}.parquet", columns=["questions"])
+                                               ["questions"])
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(report, indent=1))
+        os.replace(tmp, path)
+    return report
 
 
 def start(request: dict, token: str | None, run: bool = True) -> Job | None:

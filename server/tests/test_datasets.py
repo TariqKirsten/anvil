@@ -115,6 +115,20 @@ def test_prepare_removes_copies_and_keeps_states_on_one_side(data_settings):
     assert report["rows"]["test"] >= 10 and report["rows"]["validation"] >= 10
     train = pd.read_parquet(out / "train.parquet")
     assert report["items"]["train"] == sum(len(json.loads(q)) for q in train["questions"])  # questions, not rows
+    validation = pd.read_parquet(out / "validation.parquet")
+    asked = [name for q in validation["questions"] for name in json.loads(q)]
+    assert report["questions"] == {"bad": {"type": "noul", "rows": asked.count("bad")},
+                                   "kind": {"type": "choice", "rows": asked.count("kind")}}
+
+
+def test_data_prepared_before_reports_listed_questions_gets_the_list(data_settings):
+    folder = data_settings.prepared / "old"
+    folder.mkdir(parents=True)
+    pd.DataFrame([row("hi"), row("ho", CHOICE, {"kind": "a"}), row("hu")]).to_parquet(folder / "validation.parquet")
+    (folder / "report.json").write_text(json.dumps({"format": "decision", "rows": {"train": 9, "validation": 3}}))
+    assert datasets.cached("old")["questions"] == {"bad": {"type": "noul", "rows": 2},
+                                                  "kind": {"type": "choice", "rows": 1}}
+    assert "questions" in json.loads((folder / "report.json").read_text())  # saved, so it's worked out once
 
 
 def test_near_copies_stay_together_even_when_kept(data_settings):

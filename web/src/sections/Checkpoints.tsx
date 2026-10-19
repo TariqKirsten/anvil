@@ -1,18 +1,28 @@
-import { PICK_BY, type FormState, type SectionProps } from "../form";
+import { useEffect } from "react";
+import { pickByOptions, type FormState, type SectionProps } from "../form";
+import type { QuestionType } from "../types";
 import { Field, NumberInput, Section } from "../ui";
 
 type Checkpoints = FormState["checkpoints"];
 
-export function CheckpointSection({ form, update, errors }: SectionProps) {
+// types: the question types in the prepared validation data (null until the data is prepared).
+export function CheckpointSection({ form, update, errors, types }: SectionProps & { types: Set<QuestionType> | null }) {
   const c = form.checkpoints;
-  const options = PICK_BY[form.trainAs];
+  const options = pickByOptions(form.trainAs, types, c.falseAlarmPercent);
   const setC = (change: Partial<Checkpoints>) =>
     update((f) => ({ ...f, checkpoints: { ...f.checkpoints, ...change } }));
-  const num = (key: "every" | "keepBest" | "patience", label: string, step: number, hint?: string) => (
+  const num = (key: "every" | "keepBest" | "patience" | "falseAlarmPercent", label: string, step: number,
+    hint?: string) => (
     <Field id={key} label={label} error={errors[key]} hint={hint}>
       <NumberInput id={key} value={c[key]} step={step} invalid={!!errors[key]} onChange={(v) => setC({ [key]: v })} />
     </Field>
   );
+  // A setting the data can't score (AUROC without yes/no questions, say) moves to the first one it can.
+  const available = options.map((o) => o.value).join(",");
+  useEffect(() => {
+    if (!options.some((o) => o.value === c.pickBy)) setC({ pickBy: options[0].value });
+  }, [available, c.pickBy]);
+  const yesNo = form.trainAs === "decision" && (!types || types.has("noul"));
 
   return (
     <Section title="Checkpoints">
@@ -30,12 +40,21 @@ export function CheckpointSection({ form, update, errors }: SectionProps) {
             ))}
           </select>
         </Field>
+        {(yesNo || errors.falseAlarmPercent) && num("falseAlarmPercent", "False alarms allowed (%)", 0.1,
+          "for the catch rate")}
       </div>
       <p className="hint">
         Each checkpoint is scored on the validation set, and the best one becomes the model. A free GPU you didn't
         tick does the checks, so training doesn't pause for them; otherwise the training cards pause briefly and
         check together. The test set is used once, at the end, on the best checkpoint.
       </p>
+      {form.trainAs === "decision" && (
+        <p className="hint">
+          {types ? "Pick best by offers what this data can score." : "Prepare the data to see what it can score."}
+          {(!types || types.size > 1) && " Overall averages every question's own score (AUROC for yes/no, macro-F1 for choice, absolute error for score questions), so each question counts the same."}
+          {yesNo && ` Catch rate: the share of real yes cases caught when at most ${Number.isFinite(c.falseAlarmPercent) ? c.falseAlarmPercent : 1}% of no cases may be flagged. Keep it low for a guard; raise it where a false alarm costs little.`}
+        </p>
+      )}
     </Section>
   );
 }

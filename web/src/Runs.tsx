@@ -20,8 +20,11 @@ export const STATE_LABEL: Record<RunState, string> = {
 
 // Validation numbers by the name the server gives them.
 export const METRIC_LABEL: Record<string, string> = {
+  overall: "overall score",
   auroc: "mean AUROC",
   catch_rate: "catch rate",
+  macro_f1: "mean macro-F1",
+  mae: "mean absolute error",
   ece: "calibration error",
   accuracy: "accuracy",
   val_loss: "validation loss",
@@ -29,8 +32,11 @@ export const METRIC_LABEL: Record<string, string> = {
 
 // Shorter names for the list of runs, where space is tight.
 const SHORT_LABEL: Record<string, string> = {
+  overall: "overall",
   auroc: "AUROC",
   catch_rate: "catch rate",
+  macro_f1: "macro-F1",
+  mae: "MAE",
   ece: "calib. error",
   accuracy: "accuracy",
   val_loss: "val loss",
