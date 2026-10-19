@@ -195,12 +195,19 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   const canContinue = st.state === "done" && !!st.early_stop && !!st.total && st.step < st.total && newest != null
     && !exporting;
   const moreError = !toEnd && !(Number.isInteger(more) && more >= 1 && more <= 1000) ? "Use a whole number from 1 to 1000, or pick Train to the end." : undefined;
-  // Checks fall on every `every` steps, so with no gain the stop comes `more` checks after the newest checkpoint.
+  // Checks fall on every `every` steps, and early stopping counts the ones after where training picks up (or after
+  // the model has warmed up, if that's later), so with no gain the stop comes `more` checks after that.
   const every = cfg.checkpoints.every;
-  const stopsAt = newest != null ? (Math.floor(newest / every) + more) * every : null;
+  const stopsAt = newest != null ? (Math.floor(Math.max(newest, st.warm_until ?? 0) / every) + more) * every : null;
   const moreHint = stopsAt != null && stopsAt < (st.total ?? 0)
     ? `A check every ${every.toLocaleString()} steps: with no gain, it stops around step ${stopsAt.toLocaleString()}. A gain starts the count again.`
     : `A check every ${every.toLocaleString()} steps: that many reaches the last step, so it trains to the end either way.`;
+  // Early stopping counts the checks after the model has warmed up, or after where Keep training picked up.
+  const warmUntil = st.warm_until ?? 0;
+  const countFrom = cfg.checkpoints.countFrom ?? 0;
+  const countNote = !Math.max(warmUntil, countFrom) ? ""
+    : warmUntil >= countFrom ? `, counting the checks after step ${warmUntil.toLocaleString()}, once the model has warmed up`
+    : `, counting the checks after step ${countFrom.toLocaleString()}, where Keep training picked up`;
   const allowed = `${cfg.checkpoints.falseAlarmPercent ?? 1}%`; // the catch rate's false alarms
   const has = (key: string) => evals.some((m) => typeof m[key] === "number");
   // Overall is worth a column when the data mixes question types; with one type it's that type's average.
@@ -500,7 +507,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           Saved every {cfg.checkpoints.every.toLocaleString()} steps. Kept: the best {cfg.checkpoints.keepBest ?? 3}, the
           newest (Resume starts there), and any not checked yet.{" "}
           {cfg.checkpoints.patience
-            ? `Training stops early if the ${METRIC_LABEL[metric] ?? metric} doesn't improve for ${cfg.checkpoints.patience} checks in a row.`
+            ? `Training stops early if the ${METRIC_LABEL[metric] ?? metric} doesn't improve for ${cfg.checkpoints.patience} checks in a row${countNote}.`
             : "Early stopping is off."}
         </p>
       </Section>

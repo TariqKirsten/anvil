@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, datasets, export, folders, gpus, models_check, picking
+from . import config, datasets, export, folders, gpus, models_check, picking, supervisor
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 ACTIVE = {"starting", "loading", "running", "saving"}
@@ -531,11 +531,9 @@ def resume(run_id: str, token: str | None, patience: int | None = None) -> None:
     taken = [f"GPU {gpu} is busy with {busy[gpu]}" for gpu in cards if gpu in busy]
     if taken:
         raise ValueError(f"{'; '.join(taken)}. Resume when {'it is' if len(taken) == 1 else 'they are'} free.")
-    if patience is not None:
-        cfg["checkpoints"]["patience"] = patience
+    if patience is not None:  # the trainer counts the checks after countFrom, where it picks up again
+        cfg["checkpoints"].update(patience=patience, countFrom=supervisor.newest_checkpoint(path) or 0)
         _write(path / "config.json", cfg)
-        with picking.updating(path) as board:  # the count starts again, so a later gain restarts it at patience too
-            board["since_best"] = 0
     if again:  # no longer finished: the judge mustn't take the old finish as the end of training
         _write(path / "status.json", {**st, "early_stop": None, "training_finished": False, "finished": None,
                                       "final_test": None})

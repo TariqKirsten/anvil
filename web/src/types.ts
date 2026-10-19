@@ -200,6 +200,7 @@ export interface RunStatus {
   early_stop?: string | null;
   final_test?: (Scores & { step: number; rows?: number }) | null;
   training_finished?: boolean;
+  warm_until?: number; // the model has warmed up by this step: early stopping counts the checks after it
   crashes?: number; // times the trainer crashed in native code and started again (anvil.supervisor)
   last_crash?: { at: number; step: number; from: number | null } | null;
 }
@@ -221,7 +222,14 @@ export interface RunDetail {
     gpus?: number[];
     judge_gpu?: number | null;
     hyper: Record<string, number | string | boolean>;
-    checkpoints: { every: number; keepBest: number; patience: number; pickBy: string; falseAlarmPercent?: number };
+    checkpoints: {
+      every: number;
+      keepBest: number;
+      patience: number;
+      pickBy: string;
+      falseAlarmPercent?: number;
+      countFrom?: number; // where Keep training picked up: early stopping counts the checks after it
+    };
     created: number;
   };
   status: RunStatus;
@@ -251,7 +259,6 @@ export interface ExportStatus {
 export interface Leaderboard {
   entries: { step: number; score: number | null; metric: string; direction: "max" | "min" }[];
   best_step: number | null;
-  since_best: number;
 }
 
 export interface JudgeStatus {

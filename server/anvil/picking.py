@@ -63,7 +63,7 @@ def load(run_dir: Path) -> dict:
     try:
         return json.loads(path.read_text())
     except (OSError, ValueError):
-        return {"entries": [], "best_step": None, "since_best": 0}
+        return {"entries": [], "best_step": None}
 
 
 def save(run_dir: Path, board: dict) -> None:
@@ -85,7 +85,7 @@ def updating(run_dir: Path):
 
 
 def record(board: dict, step: int, metrics: dict, pick_by: str) -> dict:
-    """Add a check. Returns the updated board: best_step, and since_best (checks in a row without a new best)."""
+    """Add a check. Returns the updated board, whose best_step is the best check so far (never step 0)."""
     key, direction = metric_of(pick_by)
     value = score(metrics, pick_by)
     if value is None:  # the chosen metric doesn't exist for this data: rank by validation loss instead
@@ -99,9 +99,7 @@ def record(board: dict, step: int, metrics: dict, pick_by: str) -> dict:
     improved = top is None or (value is not None and top["score"] is not None and (
         value > top["score"] if direction == "max" else value < top["score"]))
     if improved:
-        board["best_step"], board["since_best"] = step, 0
-    else:
-        board["since_best"] = board.get("since_best", 0) + 1
+        board["best_step"] = step
     return board
 
 
@@ -119,14 +117,22 @@ def ranked(board: dict) -> list[dict]:
     return sorted(entries, key=lambda e: (-e["score"] if direction == "max" else e["score"], e["step"]))
 
 
-def should_stop(board: dict, patience: int) -> bool:
-    return patience > 0 and board.get("best_step") is not None and board.get("since_best", 0) >= patience
+def checks_without_gain(board: dict, after: int = 0) -> int:
+    """Checks in a row without a new best, counting only the ones after step `after`. Worked out from the checks
+    themselves, so it doesn't matter in what order they arrived (the judge can lag behind)."""
+    if board.get("best_step") is None:
+        return 0
+    return sum(1 for e in board["entries"] if e["step"] > max(board["best_step"], after))
 
 
-def stop_reason(board: dict, patience: int) -> str | None:
+def should_stop(board: dict, patience: int, after: int = 0) -> bool:
+    return patience > 0 and board.get("best_step") is not None and checks_without_gain(board, after) >= patience
+
+
+def stop_reason(board: dict, patience: int, after: int = 0) -> str | None:
     """Why training should stop early, or None to carry on. Read from the live leaderboard, so a better check that
-    arrives later (the judge can lag behind) cancels it."""
-    if not should_stop(board, patience):
+    arrives later cancels it. Only the checks after step `after` count: before it the model is still warming up."""
+    if not should_stop(board, patience, after):
         return None
     metric = best(board)["metric"]
     return f"{LABELS.get(metric, metric)} didn't improve for {patience} checks in a row"

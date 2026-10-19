@@ -407,6 +407,18 @@ def test_an_unimprovable_run_stops_early_and_keeps_its_best(tmp_path, tiny_model
     assert json.loads((run_dir / "model" / "merged" / "anvil.json").read_text())["picked_step"] == 2
 
 
+def test_early_stopping_counts_only_the_checks_after_the_warmup(tmp_path, tiny_model):
+    data = prepared(tmp_path, decision_rows(80), decision_rows(12, seed=1))
+    cfg = run_config(tiny_model, data, maxSteps=60, every=2, learningRate="1e-30", scheduler="constant",
+                     warmupPercent=10)
+    cfg["checkpoints"].update(patience=1, keepBest=1, pickBy="auroc")
+    run_dir = make_run(tmp_path, cfg)
+    status = finish(start(run_dir), run_dir)
+    # Warming up until step 6: the checks at 4 and 6 don't count, so the first one without a gain is at 8.
+    assert status["warm_until"] == 6 and status["step"] == 8 and status["best_step"] == 2, status
+    assert status["early_stop"] == "Mean AUROC didn't improve for 1 checks in a row"
+
+
 def test_a_run_that_stopped_early_trains_on_with_more_patience_or_to_the_end(tmp_path, tiny_model, monkeypatch):
     monkeypatch.setattr(config, "settings", config.Settings(password="x", data=tmp_path / "data", hf_token=None))
     monkeypatch.setattr(runs.gpus, "list_gpus", lambda: {"gpus": [{"index": 0, "display": False, "busy": False}]})
@@ -423,7 +435,8 @@ def test_a_run_that_stopped_early_trains_on_with_more_patience_or_to_the_end(tmp
     with pytest.raises(ValueError, match="how many more checks"):
         runs.resume("early", None)
     runs.resume("early", None, patience=2)  # two more checks without a gain: 6 and 8
-    assert json.loads((run_dir / "config.json").read_text())["checkpoints"]["patience"] == 2
+    checkpoints = json.loads((run_dir / "config.json").read_text())["checkpoints"]
+    assert checkpoints["patience"] == 2 and checkpoints["countFrom"] == 4  # counted from where it picks up
     status = finish(procs[-1], run_dir)
     assert status["state"] == "done" and status["step"] == 8, status
     assert status["early_stop"] == "Mean AUROC didn't improve for 2 checks in a row"
@@ -460,23 +473,24 @@ def test_a_judge_process_checks_every_checkpoint(tmp_path, tiny_model):
 def test_picking_rules():
     from anvil import picking
 
-    board = {"entries": [], "best_step": None, "since_best": 0}
+    board = {"entries": [], "best_step": None}
     for step, auroc in [(0, 0.9), (10, 0.7), (20, 0.8), (30, 0.75), (40, 0.79)]:
         board = picking.record(board, step, {"auroc": auroc, "val_loss": 1.0}, "auroc")
-    assert board["best_step"] == 20 and board["since_best"] == 2  # step 0 scored highest but is never picked
+    assert board["best_step"] == 20 and picking.checks_without_gain(board) == 2  # step 0 is never picked
     assert picking.should_stop(board, 2) and not picking.should_stop(board, 3) and not picking.should_stop(board, 0)
+    assert picking.checks_without_gain(board, after=30) == 1 and not picking.should_stop(board, 2, after=30)
     assert [e["step"] for e in picking.ranked(board)] == [20, 40, 30, 10]
     assert picking.keep(board, 2, [10, 20, 30, 40, 50]) == {20, 40, 50}  # best two, plus the newest and unchecked
     assert picking.stop_reason(board, 2) == "Mean AUROC didn't improve for 2 checks in a row"
     board = picking.record(board, 50, {"auroc": 0.85}, "auroc")  # a later, better check cancels the stop
     assert board["best_step"] == 50 and picking.stop_reason(board, 2) is None
-    loss_board = {"entries": [], "best_step": None, "since_best": 0}
+    loss_board = {"entries": [], "best_step": None}
     for step, loss in [(10, 0.5), (20, 0.4), (30, 0.45)]:
         loss_board = picking.record(loss_board, step, {"val_loss": loss}, "val_loss")
     assert loss_board["best_step"] == 20  # lower is better for losses
-    no_auroc = picking.record({"entries": [], "best_step": None, "since_best": 0}, 10, {"val_loss": 0.3}, "auroc")
+    no_auroc = picking.record({"entries": [], "best_step": None}, 10, {"val_loss": 0.3}, "auroc")
     assert no_auroc["entries"][0]["metric"] == "val_loss"  # falls back when no yes/no question could be scored
-    mae_board = {"entries": [], "best_step": None, "since_best": 0}
+    mae_board = {"entries": [], "best_step": None}
     for step, mae in [(10, 0.6), (20, 0.3), (30, 0.4)]:
         mae_board = picking.record(mae_board, step, {"mae": mae, "val_loss": 1.0}, "mae")
     assert mae_board["best_step"] == 20  # fewer levels off is better

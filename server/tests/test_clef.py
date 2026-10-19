@@ -95,11 +95,12 @@ def test_a_clef_run_trains_its_head_and_saves_it_like_a_clef_release(tmp_path, t
 
 def test_a_new_head_trains_alone_first(tmp_path, tiny_model):
     data = prepared(tmp_path, decision_rows(80), decision_rows(12, seed=1))
-    cfg = clef_config(tiny_model, data, maxSteps=20, every=2)
+    cfg = clef_config(tiny_model, data, maxSteps=20, every=2, warmupPercent=10)
     cfg["checkpoints"].update(keepBest=100, patience=0)
     run_dir = make_run(tmp_path, cfg)
     status = finish(start(run_dir), run_dir)
     assert status["head_first"] == 2  # a tenth of 20 steps
+    assert status["warm_until"] == 3  # then the model's warmup: a tenth of the other 18 steps, rounded down
 
     def lora_b(step):
         weights = load_file(str(run_dir / "checkpoints" / f"step-{step:07d}" / "adapter" / "adapter_model.safetensors"))

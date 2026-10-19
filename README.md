@@ -151,7 +151,10 @@ every validation check, the final test, the checkpoints and the log.
   over the checks.
 - Only the best **Keep best** checkpoints are kept, plus the newest (Resume starts there) and any not checked yet.
 - **Stop after no gain for** N checks ends training early once the score hasn't improved for N checks in a row
-  (0 turns this off).
+  (0 turns this off). Only the checks after the warmup count, and for a new Clef head after its steps alone too:
+  until then the scores say little about where the model is going.
+- **Keep training**, on a run that stopped early before its last step, carries on from the newest checkpoint. It asks
+  again: stop early after N more checks without a gain, or train to the last step.
 - When training ends, the best checkpoint becomes the model and is scored once on the test set (up to 5,000 rows).
   The test set plays no part in picking, so that's the fair number to quote.
 

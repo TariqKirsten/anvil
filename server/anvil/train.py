@@ -371,10 +371,14 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     # A new head is random at first, so the model would learn from noise: the head trains alone for a while.
     head_first = int(total * HEAD_FIRST) if fresh_head(cfg) else 0
 
+    def warmup(start: int) -> int:
+        """The warmup's steps, in a schedule over the steps from start to the end."""
+        return int(max(1, total - start) * float(h["warmupPercent"]) / 100)
+
     def schedule(start: int):
         """Warmup, then the chosen schedule, over the steps from start to the end (nothing before start)."""
         span = max(1, total - start)
-        warm = int(span * float(h["warmupPercent"]) / 100)
+        warm = warmup(start)
 
         def factor(step: int) -> float:
             if step < start:
@@ -392,6 +396,10 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
         return factor
 
     sched = torch.optim.lr_scheduler.LambdaLR(opt, [schedule(head_first)] + ([schedule(0)] if head else []))
+    # Until the model has warmed up (after a new head's steps alone, if any), a pause in its gains says nothing yet:
+    # early stopping counts the checks after that, or after where Keep training picked up if that's later.
+    warm_until = head_first + warmup(head_first)
+    count_after = max(warm_until, int(ck.get("countFrom") or 0))
     step = epoch = batch_index = 0
     if resume_from is not None:
         state = json.loads((resume_from / "state.json").read_text())
@@ -418,7 +426,7 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
 
     report.update(state="running", stage=training(), step=step, total=total, epoch=epoch,
                   trainable_m=round(n_trainable / 1e6, 1), head_m=round(sum(p.numel() for p in head) / 1e6, 1),
-                  head_first=head_first, items=len(items), world=world,
+                  head_first=head_first, warm_until=warm_until, items=len(items), world=world,
                   steps_per_epoch=steps_per_epoch, items_per_step=per_batch * accum)
 
     board = picking.load(run_dir)
@@ -449,7 +457,7 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
         report.update(stage=training(), checkpoints=[p.name for p in checkpoints(run_dir)])
 
     def early_stop_reason() -> str | None:
-        return picking.stop_reason(picking.load(run_dir) if judged_elsewhere else board, patience)
+        return picking.stop_reason(picking.load(run_dir) if judged_elsewhere else board, patience, count_after)
 
     every = int(ck["every"])
     log_every = max(1, min(50, total // 200))
