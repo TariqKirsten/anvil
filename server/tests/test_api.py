@@ -77,3 +77,16 @@ def test_no_account_means_nobody_can_log_in(tmp_path, monkeypatch):
     c = client()
     assert login(c, "").status_code == 503
     assert c.get("/api/folders").status_code == 401
+
+
+def test_a_run_is_deleted_through_the_api(settings):
+    c = client()
+    login(c)
+    run = settings.data / "runs" / "old-run"
+    run.mkdir(parents=True)
+    (run / "config.json").write_text("{}")
+    (run / "status.json").write_text('{"state": "done"}')
+    answer = c.delete("/api/runs/old-run")
+    assert answer.status_code == 200 and answer.json()["freed"] > 0 and not run.exists()
+    assert c.delete("/api/runs/old-run").status_code == 404
+    assert c.delete("/api/runs/Not_A_Run").status_code == 404

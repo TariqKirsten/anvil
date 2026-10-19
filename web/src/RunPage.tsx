@@ -1,10 +1,11 @@
 // One run, live: progress, speed, the loss and validation charts, which checkpoint is best, the final test, the
 // checkpoints kept, the log, and Stop / Resume.
 
-import { IconArrowLeft, IconPlayerPlay, IconPlayerStop } from "@tabler/icons-react";
+import { IconArrowLeft, IconPlayerPlay, IconPlayerStop, IconTrash } from "@tabler/icons-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { Chart } from "./Chart";
+import { bytes } from "./format";
 import { METRIC_LABEL, STATE_LABEL, stateTone, when } from "./Runs";
 import { Topbar } from "./Topbar";
 import type { RunDetail, RunMetric } from "./types";
@@ -66,6 +67,9 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   const [run, setRun] = useState<RunDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const logRef = useRef<HTMLPreElement>(null);
   const active = run ? ACTIVE.has(run.status.state) : true;
 
@@ -101,6 +105,20 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setActing(false);
+    }
+  }
+
+  // Deleting removes the run's folder for good: checkpoints, the finished model, metrics and the log.
+  async function remove() {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await api(`/api/runs/${id}`, { method: "DELETE" });
+      window.location.hash = "#/runs";
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : String(e));
+      setDeleting(false);
+      setConfirming(false);
     }
   }
 
@@ -165,7 +183,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
               {cfg.training_type === "lora" ? "LoRA" : "full fine-tuning"} ·{" "}
               {cfg.judge_gpu != null ? `trains on ${cardNames(cards)}, checks on GPU ${cfg.judge_gpu}`
                 : cards.length > 1 ? `trains on ${cardNames(cards)}` : `GPU ${cards[0]}`} ·
-              started {when(cfg.created)}
+              started {when(cfg.created)} · {bytes(run.size)} on disk
             </p>
           </div>
           <div className="run-actions">
@@ -180,8 +198,28 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
                 <IconPlayerPlay size={16} aria-hidden /> {acting ? "Resuming…" : "Resume"}
               </button>
             )}
+            {!ACTIVE.has(st.state) && !confirming && (
+              <button type="button" className="danger" onClick={() => setConfirming(true)}>
+                <IconTrash size={16} aria-hidden /> Delete
+              </button>
+            )}
           </div>
         </div>
+        {confirming && (
+          <div className="confirm-box" role="alertdialog" aria-label="Delete this run?">
+            <p>
+              Delete <strong>{cfg.name}</strong> for good? Its checkpoints, finished model, metrics and log go too,
+              freeing {bytes(run.size)}. This can't be undone.
+            </p>
+            <div className="confirm-actions">
+              <button type="button" className="danger-solid" disabled={deleting} onClick={remove}>
+                <IconTrash size={16} aria-hidden /> {deleting ? "Deleting…" : "Delete run"}
+              </button>
+              <button type="button" disabled={deleting} onClick={() => setConfirming(false)}>Cancel</button>
+            </div>
+          </div>
+        )}
+        {deleteError && <p className="error-box">{deleteError}</p>}
 
         <div className="run-bar">
           <div className="bar big"><div style={{ width: `${pct}%` }} /></div>

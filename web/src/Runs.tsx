@@ -3,6 +3,7 @@
 import { IconPlus } from "@tabler/icons-react";
 import { useEffect, useState } from "react";
 import { api } from "./api";
+import { bytes } from "./format";
 import { Topbar } from "./Topbar";
 import type { RunState, RunSummary } from "./types";
 import { Badge } from "./ui";
@@ -91,7 +92,8 @@ export function Runs({ onLogout }: { onLogout: () => void }) {
                   <span className="run-title">{r.name}</span>
                   <span className="run-meta">
                     {r.model} · {r.train_as === "decision" ? "decision" : "language"} model ·{" "}
-                    {r.gpus.length > 1 ? `GPUs ${r.gpus.join(", ")}` : `GPU ${r.gpu}`} · {when(r.created)}
+                    {r.gpus.length > 1 ? `GPUs ${r.gpus.join(", ")}` : `GPU ${r.gpu}`} · {when(r.created)} ·{" "}
+                    {bytes(r.size)}
                   </span>
                 </span>
                 <span className="run-progress">

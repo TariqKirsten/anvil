@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -266,7 +267,19 @@ def summary(run_id: str) -> dict:
             "gpus": training_gpus(cfg) if cfg.get("gpu") is not None else [], "created": cfg.get("created"),
             "state": st.get("state"), "stage": st.get("stage"), "step": st.get("step", 0), "total": st.get("total"),
             "updated": st.get("updated"), "last_eval": st.get("last_eval"), "error": st.get("error"),
-            "best": picking.best(picking.load(path))}
+            "best": picking.best(picking.load(path)), "size": size(path)}
+
+
+def size(path: Path) -> int:
+    """Bytes a run takes on disk: its checkpoints, model, metrics and logs."""
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError:  # removed meanwhile (the trainer pruning a checkpoint)
+                pass
+    return total
 
 
 def list_runs() -> list[dict]:
@@ -295,7 +308,7 @@ def detail(run_id: str, log_lines: int = 200) -> dict:
         if (path / "checkpoints").exists() else []
     return {"config": _read(path / "config.json", {}), "status": status(run_id), "metrics": metrics, "log": log,
             "checkpoints": ckpts, "model": str(path / "model") if (path / "model").exists() else None,
-            "leaderboard": picking.load(path), "judge": judge_status(run_id)}
+            "leaderboard": picking.load(path), "judge": judge_status(run_id), "size": size(path)}
 
 
 def _judge_running(run_id: str) -> bool:
@@ -314,6 +327,21 @@ def judge_status(run_id: str) -> dict | None:
                                                                   "checks whatever it missed itself.")
             _write(path, current)
     return current
+
+
+def delete(run_id: str) -> int:
+    """Delete a run with everything it saved: checkpoints, the finished model, metrics and logs. Returns the bytes freed.
+    A run that's still training, or whose judge is still checking, has to finish or be stopped first."""
+    path = run_dir(run_id)
+    if status(run_id).get("state") in ACTIVE:
+        raise ValueError("This run is still going. Stop it first, then delete it.")
+    if _judge_running(run_id):
+        raise ValueError("This run's judge is still checking its last checkpoints. Try again when it's done.")
+    freed = size(path)
+    shutil.rmtree(path)
+    _processes.pop(run_id, None)
+    _processes.pop(f"{run_id}:judge", None)
+    return freed
 
 
 def stop(run_id: str) -> None:

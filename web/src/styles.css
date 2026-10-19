@@ -1464,3 +1464,42 @@ h1 {
   font-size: 13px;
   cursor: pointer;
 }
+
+button.danger {
+  color: var(--bad);
+}
+
+button.danger:hover {
+  background: var(--bad-bg);
+}
+
+button.danger-solid {
+  border-color: transparent;
+  background: var(--bad);
+  color: var(--surface);
+  font-weight: 500;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.confirm-box {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--bad);
+  border-radius: var(--radius);
+  background: var(--bad-bg);
+  font-size: 14px;
+}
+
+.confirm-box p {
+  margin: 0 0 10px;
+}
+
+.confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

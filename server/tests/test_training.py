@@ -294,6 +294,35 @@ def test_a_judge_still_checking_after_stop_keeps_its_card_and_serves_the_resume(
     assert json.loads((path / "config.json").read_text())["judge_gpu"] == 0
 
 
+def test_deleting_a_run_removes_everything_it_saved(run_settings):
+    run_id = runs.create(FORM, {"train": {}}, None)
+    path = config.settings.data / "runs" / run_id
+    (path / "status.json").write_text(json.dumps({"state": "done"}))
+    (path / "checkpoints" / "step-0000010").mkdir(parents=True)
+    (path / "checkpoints" / "step-0000010" / "adapter_model.safetensors").write_bytes(b"x" * 1000)
+    assert runs.summary(run_id)["size"] >= 1000
+    assert runs.delete(run_id) >= 1000 and not path.exists()
+    with pytest.raises(FileNotFoundError):
+        runs.delete(run_id)
+
+
+def test_a_running_run_or_its_judge_blocks_deleting(run_settings):
+    run_id = runs.create({**FORM, "gpus": [1]}, {"train": {}}, None)  # GPU 0 judges
+    path = config.settings.data / "runs" / run_id
+    (path / "status.json").write_text(json.dumps({"state": "running", "pid": os.getpid()}))
+    with pytest.raises(ValueError, match="still going"):
+        runs.delete(run_id)
+    (path / "status.json").write_text(json.dumps({"state": "stopped"}))
+    (path / "judge").mkdir(exist_ok=True)
+    (path / "judge" / "status.json").write_text(json.dumps({"state": "checking", "gpu": 0, "pid": os.getpid(),
+                                                            "updated": time.time()}))
+    with pytest.raises(ValueError, match="judge is still checking"):
+        runs.delete(run_id)
+    (path / "judge" / "status.json").write_text(json.dumps({"state": "done", "gpu": 0}))
+    runs.delete(run_id)
+    assert not path.exists()
+
+
 @pytest.mark.parametrize("change, reason", [
     ({"hyper": {**FORM["hyper"], "headLearningRate": "big"}}, "head learning rate isn't a number"),
     ({"trainingType": "qlora"}, "QLoRA"),

@@ -333,6 +333,16 @@ def get_run(run_id: str) -> dict:
         raise HTTPException(404, str(exc)) from exc
 
 
+@app.delete("/api/runs/{run_id}")
+def delete_run(run_id: str) -> dict:
+    try:
+        return {"freed": runs.delete(run_id)}
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.post("/api/runs/{run_id}/stop")
 def stop_run(run_id: str) -> dict:
     try:

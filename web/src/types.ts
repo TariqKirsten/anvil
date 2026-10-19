@@ -145,6 +145,7 @@ export interface RunSummary {
   last_eval: Record<string, number> | null;
   error: string | null;
   best: Leaderboard["entries"][number] | null;
+  size: number; // bytes on disk
 }
 
 export interface RunStatus {
@@ -204,6 +205,7 @@ export interface RunDetail {
   model: string | null;
   leaderboard: Leaderboard;
   judge: JudgeStatus | null;
+  size: number; // bytes on disk: checkpoints, model, metrics and logs
 }
 
 // server/anvil/picking.py: one entry per validation check; best_step is the checkpoint that becomes the model.

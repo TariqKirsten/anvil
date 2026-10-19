@@ -91,6 +91,9 @@ every validation check, the final test, the checkpoints and the log.
   exactly where it stopped, after a crash too.
 - The finished model is in the run's folder: `model/adapter` and `model/merged` (for LoRA), or `model/merged`. Its
   `anvil.json` says which checkpoint it is and what it scored on the test set.
+- **Delete** (on the page of a run that has finished, failed or stopped) removes the run for good: checkpoints, the
+  finished model, metrics and the log. It says how much space that frees and asks first. A run that's still training,
+  or whose judge is still checking, can't be deleted.
 
 ### Several GPUs
 
