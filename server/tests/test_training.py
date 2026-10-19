@@ -366,6 +366,36 @@ def test_an_unimprovable_run_stops_early_and_keeps_its_best(tmp_path, tiny_model
     assert json.loads((run_dir / "model" / "merged" / "anvil.json").read_text())["picked_step"] == 2
 
 
+def test_a_run_that_stopped_early_trains_on_with_more_patience_or_to_the_end(tmp_path, tiny_model, monkeypatch):
+    monkeypatch.setattr(config, "settings", config.Settings(password="x", data=tmp_path / "data", hf_token=None))
+    monkeypatch.setattr(runs.gpus, "list_gpus", lambda: {"gpus": [{"index": 0, "display": False, "busy": False}]})
+    procs = []
+    monkeypatch.setattr(runs, "_spawn", lambda run_id, path, gpus, token, resume, judge_gpu=None:
+                        procs.append(start(path, resume=resume)))
+    data = prepared(tmp_path, decision_rows(80), decision_rows(12, seed=1))
+    cfg = run_config(tiny_model, data, maxSteps=20, every=2, learningRate="1e-30", scheduler="constant")
+    cfg["checkpoints"].update(patience=1, keepBest=1, pickBy="auroc")
+    (tmp_path / "data" / "runs").mkdir(parents=True)
+    run_dir = make_run(tmp_path / "data" / "runs", cfg, "early")
+    assert finish(start(run_dir), run_dir)["step"] == 4  # nothing improves after the check at 2
+
+    with pytest.raises(ValueError, match="how many more checks"):
+        runs.resume("early", None)
+    runs.resume("early", None, patience=2)  # two more checks without a gain: 6 and 8
+    assert json.loads((run_dir / "config.json").read_text())["checkpoints"]["patience"] == 2
+    status = finish(procs[-1], run_dir)
+    assert status["state"] == "done" and status["step"] == 8, status
+    assert status["early_stop"] == "Mean AUROC didn't improve for 2 checks in a row"
+    assert any(m["type"] == "resume" and m["step"] == 4 for m in metrics(run_dir))
+
+    runs.resume("early", None, patience=0)  # to the last step
+    status = finish(procs[-1], run_dir)
+    assert status["state"] == "done" and status["step"] == 20 and status["early_stop"] is None, status
+    assert status["best_step"] == 2 and status["final_test"]["step"] == 2
+    with pytest.raises(ValueError, match="has finished"):
+        runs.resume("early", None, patience=2)
+
+
 def test_a_judge_process_checks_every_checkpoint(tmp_path, tiny_model):
     data = prepared(tmp_path, decision_rows(40), decision_rows(12, seed=1))
     cfg = run_config(tiny_model, data, maxSteps=6, every=2)

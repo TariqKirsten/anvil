@@ -378,10 +378,14 @@ def stop_run(run_id: str) -> dict:
     return {"ok": True}
 
 
+class ResumeBody(BaseModel):
+    patience: int | None = None  # more checks without a gain to wait; 0 trains to the last step
+
+
 @app.post("/api/runs/{run_id}/resume")
-def resume_run(run_id: str, request: Request) -> dict:
+def resume_run(run_id: str, request: Request, body: ResumeBody | None = None) -> dict:
     try:
-        runs.resume(run_id, hf_token(request))
+        runs.resume(run_id, hf_token(request), body.patience if body else None)
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

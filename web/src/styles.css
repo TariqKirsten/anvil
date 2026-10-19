@@ -1683,6 +1683,31 @@ button:disabled {
   margin: 0 0 10px;
 }
 
+.resume-box {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-bg);
+  font-size: 14px;
+}
+
+.resume-box p {
+  margin: 0;
+}
+
+.resume-box .field {
+  align-self: stretch;
+}
+
+.resume-box .field input {
+  width: min(100%, 160px);
+}
+
 .confirm-actions {
   display: flex;
   flex-wrap: wrap;

@@ -469,13 +469,28 @@ def stop(run_id: str) -> None:
     _write(path / "status.json", st)
 
 
-def resume(run_id: str, token: str | None) -> None:
+def early_stopped(st: dict) -> bool:
+    """Finished because early stopping said so, before its last step: Resume can carry on training it."""
+    return st.get("state") == "done" and bool(st.get("early_stop")) and st.get("step", 0) < (st.get("total") or 0)
+
+
+def resume(run_id: str, token: str | None, patience: int | None = None) -> None:
+    """Carry on from the newest checkpoint. patience, when given, replaces Stop after no gain for, counted from here:
+    how many checks in a row without a gain to wait (0 trains to the last step). A run that stopped early needs it, or
+    it would stop again at once."""
     path = run_dir(run_id)
     st = status(run_id)
     if st.get("state") in ACTIVE:
         raise ValueError("This run is still running.")
-    if st.get("state") == "done":
+    again = early_stopped(st)
+    if st.get("state") == "done" and not again:
         raise ValueError("This run has finished.")
+    if again and patience is None:
+        raise ValueError("Say how many more checks without a gain to wait, or 0 to train to the last step.")
+    if patience is not None and not 0 <= patience <= 1000:
+        raise ValueError("Use 0 (never stop early) or a whole number up to 1000.")
+    if again and _exporting(run_id):
+        raise ValueError("This run is being exported. Try again when the export is done.")
     cfg = _read(path / "config.json")
     if not Path(cfg["data"]["prepared"], "train.parquet").exists():
         raise ValueError("The prepared data for this run is gone. Prepare it again and start a new run.")
@@ -484,6 +499,14 @@ def resume(run_id: str, token: str | None) -> None:
     taken = [f"GPU {gpu} is busy with {busy[gpu]}" for gpu in cards if gpu in busy]
     if taken:
         raise ValueError(f"{'; '.join(taken)}. Resume when {'it is' if len(taken) == 1 else 'they are'} free.")
+    if patience is not None:
+        cfg["checkpoints"]["patience"] = patience
+        _write(path / "config.json", cfg)
+        with picking.updating(path) as board:  # the count starts again, so a later gain restarts it at patience too
+            board["since_best"] = 0
+    if again:  # no longer finished: the judge mustn't take the old finish as the end of training
+        _write(path / "status.json", {**st, "early_stop": None, "training_finished": False, "finished": None,
+                                      "final_test": None})
     judge_gpu = cfg.get("judge_gpu")
     if _judge_running(run_id):  # still checking from before the stop: it carries on with the resumed trainer
         _spawn(run_id, path, cards, token, resume=True)

@@ -11,7 +11,7 @@ import { QuestionScores, questionsOf, type ScoredCheck } from "./QuestionScores"
 import { METRIC_LABEL, STATE_LABEL, stateTone, when } from "./Runs";
 import { Topbar } from "./Topbar";
 import type { RunDetail, RunMetric } from "./types";
-import { Badge, Section } from "./ui";
+import { Badge, Field, NumberInput, Section, Segmented } from "./ui";
 
 const ACTIVE = new Set(["starting", "loading", "running", "saving"]);
 
@@ -78,6 +78,14 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Training on after an early stop: a new Stop after no gain for, counted from here, or on to the last step.
+  const [continuing, setContinuing] = useState(false);
+  const [toEnd, setToEnd] = useState(false);
+  const [more, setMore] = useState(3);
+  const [continueError, setContinueError] = useState<string | null>(null);
+  const keepRef = useRef<HTMLButtonElement>(null);
+  const boxRef = useRef<HTMLFormElement>(null);
+  const wasContinuing = useRef(false);
   const logRef = useRef<HTMLPreElement>(null);
   const active = run ? ACTIVE.has(run.status.state) : true;
   const exporting = !!run?.exports.some((e) => e.state === "starting" || e.state === "running");
@@ -106,6 +114,13 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
     if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 80) el.scrollTop = el.scrollHeight;
   }, [run?.log]);
 
+  // The Keep training button gives way to its box: focus goes into the box, and back to the button on Cancel.
+  useEffect(() => {
+    if (continuing) boxRef.current?.querySelector("button")?.focus();
+    else if (wasContinuing.current) keepRef.current?.focus();
+    wasContinuing.current = continuing;
+  }, [continuing]);
+
   async function act(what: "stop" | "resume") {
     setActing(true);
     try {
@@ -113,6 +128,21 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
       setRun(await api<RunDetail>(`/api/runs/${id}`));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setActing(false);
+    }
+  }
+
+  // patience: checks in a row without a gain to wait from here; 0 trains to the last step.
+  async function keepTraining(patience: number) {
+    setActing(true);
+    setContinueError(null);
+    try {
+      await api(`/api/runs/${id}/resume`, { json: { patience } });
+      setRun(await api<RunDetail>(`/api/runs/${id}`));
+      setContinuing(false); // with the new status, so the Keep training button doesn't flash back in between
+    } catch (e) {
+      setContinueError(e instanceof Error ? e.message : String(e));
     } finally {
       setActing(false);
     }
@@ -161,6 +191,16 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   // A failed run never gets a finish time, so its last update stands in for one.
   const end = st.finished ?? st.stopped ?? (ACTIVE.has(st.state) ? Date.now() / 1000 : st.updated);
   const elapsed = st.started && end ? end - st.started : null;
+  // Stopped early before its last step: it can train on from the newest checkpoint (not while an export reads it).
+  const canContinue = st.state === "done" && !!st.early_stop && !!st.total && st.step < st.total && newest != null
+    && !exporting;
+  const moreError = !toEnd && !(Number.isInteger(more) && more >= 1 && more <= 1000) ? "Use a whole number from 1 to 1000, or pick Train to the end." : undefined;
+  // Checks fall on every `every` steps, so with no gain the stop comes `more` checks after the newest checkpoint.
+  const every = cfg.checkpoints.every;
+  const stopsAt = newest != null ? (Math.floor(newest / every) + more) * every : null;
+  const moreHint = stopsAt != null && stopsAt < (st.total ?? 0)
+    ? `A check every ${every.toLocaleString()} steps: with no gain, it stops around step ${stopsAt.toLocaleString()}. A gain starts the count again.`
+    : `A check every ${every.toLocaleString()} steps: that many reaches the last step, so it trains to the end either way.`;
   const allowed = `${cfg.checkpoints.falseAlarmPercent ?? 1}%`; // the catch rate's false alarms
   const has = (key: string) => evals.some((m) => typeof m[key] === "number");
   // Overall is worth a column when the data mixes question types; with one type it's that type's average.
@@ -227,8 +267,22 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
                 <IconPlayerPlay size={16} aria-hidden /> {acting ? "Resuming…" : "Resume"}
               </button>
             )}
+            {canContinue && !continuing && (
+              <button type="button" className="primary" ref={keepRef}
+                onClick={() => {
+                  setContinuing(true);
+                  setContinueError(null);
+                  setConfirming(false);
+                }}>
+                <IconPlayerPlay size={16} aria-hidden /> Keep training
+              </button>
+            )}
             {!ACTIVE.has(st.state) && !exporting && !confirming && (
-              <button type="button" className="danger" onClick={() => setConfirming(true)}>
+              <button type="button" className="danger"
+                onClick={() => {
+                  setConfirming(true);
+                  setContinuing(false);
+                }}>
                 <IconTrash size={16} aria-hidden /> Delete
               </button>
             )}
@@ -249,6 +303,33 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           </div>
         )}
         {deleteError && <p className="error-box">{deleteError}</p>}
+        {canContinue && continuing && (
+          <form ref={boxRef} className="resume-box" aria-label="Keep training"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!moreError) keepTraining(toEnd ? 0 : more);
+            }}>
+            <p>
+              Train on from the newest checkpoint (step {newest!.toLocaleString()}) towards step{" "}
+              {st.total!.toLocaleString()}. The finished model is picked again at the end, from every check so far.
+            </p>
+            <Segmented label="When to stop" value={toEnd ? "end" : "early"} onChange={(v) => setToEnd(v === "end")}
+              options={[{ value: "early", label: "Stop early" }, { value: "end", label: "To the end" }]} />
+            {toEnd && <p className="hint">No early stopping: it trains all the way to step {st.total!.toLocaleString()}.</p>}
+            {!toEnd && (
+              <Field id="more-checks" label="More checks without a gain" error={moreError} hint={moreHint}>
+                <NumberInput id="more-checks" value={more} min={1} step={1} invalid={!!moreError} onChange={setMore} />
+              </Field>
+            )}
+            {continueError && <p className="field-error" role="alert">{continueError}</p>}
+            <div className="confirm-actions">
+              <button type="submit" className="primary" disabled={acting || !!moreError}>
+                <IconPlayerPlay size={16} aria-hidden /> {acting ? "Starting…" : "Keep training"}
+              </button>
+              <button type="button" disabled={acting} onClick={() => setContinuing(false)}>Cancel</button>
+            </div>
+          </form>
+        )}
 
         <div className="run-bar">
           <div className="bar big"><div style={{ width: `${pct}%` }} /></div>
@@ -294,7 +375,10 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           </p>
         )}
         {st.early_stop && (
-          <p className="hint">Stopped early at step {st.step.toLocaleString()}: {st.early_stop}.</p>
+          <p className="hint">
+            Stopped early at step {st.step.toLocaleString()}: {st.early_stop}.
+            {canContinue && " Keep training carries on from the newest checkpoint if you'd rather wait longer."}
+          </p>
         )}
         {st.state === "stopped" && <p className="hint">Stopped at step {st.step}. Resume continues from the last checkpoint.</p>}
         {!!st.skipped && <p className="warn-text">{st.skipped} batches were skipped because their loss wasn't a number.</p>}
