@@ -5,6 +5,7 @@ import { IconArrowLeft, IconPlayerPlay, IconPlayerStop, IconTrash } from "@table
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { Chart } from "./Chart";
+import { ExportSection } from "./ExportSection";
 import { bytes } from "./format";
 import { METRIC_LABEL, STATE_LABEL, stateTone, when } from "./Runs";
 import { Topbar } from "./Topbar";
@@ -72,6 +73,8 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const logRef = useRef<HTMLPreElement>(null);
   const active = run ? ACTIVE.has(run.status.state) : true;
+  const exporting = !!run?.exports.some((e) => e.state === "starting" || e.state === "running");
+  const polling = active || exporting;
 
   useEffect(() => {
     let alive = true;
@@ -84,12 +87,12 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
         })
         .catch((e: Error) => alive && setError(e.message));
     load();
-    const timer = setInterval(load, active ? 2000 : 15000);
+    const timer = setInterval(load, polling ? 2000 : 15000);
     return () => {
       alive = false;
       clearInterval(timer);
     };
-  }, [id, active]);
+  }, [id, polling]);
 
   useEffect(() => {
     const el = logRef.current;
@@ -198,7 +201,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
                 <IconPlayerPlay size={16} aria-hidden /> {acting ? "Resuming…" : "Resume"}
               </button>
             )}
-            {!ACTIVE.has(st.state) && !confirming && (
+            {!ACTIVE.has(st.state) && !exporting && !confirming && (
               <button type="button" className="danger" onClick={() => setConfirming(true)}>
                 <IconTrash size={16} aria-hidden /> Delete
               </button>
@@ -346,6 +349,11 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
             {decision && " Catch rate: the share of real yes cases caught when only 1 in 100 no cases may be flagged. False alarms: the share of no cases flagged at 50%. Calibration error: how far the confidence is from how often it's right (lower is better)."}
           </p>
         </Section>
+      )}
+
+      {!ACTIVE.has(st.state) && run.versions.length > 0 && (
+        <ExportSection run={run} id={id} best={best}
+          onStarted={() => api<RunDetail>(`/api/runs/${id}`).then(setRun).catch(() => {})} />
       )}
 
       <Section title="Checkpoints">

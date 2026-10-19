@@ -95,6 +95,21 @@ every validation check, the final test, the checkpoints and the log.
   finished model, metrics and the log. It says how much space that frees and asks first. A run that's still training,
   or whose judge is still checking, can't be deleted.
 
+### Exporting as GGUF
+
+- **Export as GGUF** on a run's page (once it has finished or stopped): pick the finished model or any checkpoint
+  still kept (each shows its validation score), pick the types (BF16, Q8_0, Q6_K, Q5_K_M, Q4_K_M; sizes are
+  estimated), and export. The files appear on the page to download, with an `anvil.json` that says which version they
+  are, how it scored and how to prompt it. They're in the run's folder under `exports/<version>/`.
+- It runs on the CPU, so the GPUs stay free, with llama.cpp v0.7.0 (built into the image): its converter writes a
+  full-quality GGUF, and `llama-quantize` makes the smaller types from it. A LoRA checkpoint is merged into the base
+  model first.
+- Letters models become ordinary GGUFs (prompt them the letters way). Clef models become decision GGUFs with their
+  head: llama-server answers SystemOne requests with them at `/v1/systemone`; give it batch sizes that fit your longest
+  input (`-c 8192 -b 8192 -ub 8192`), since a decision model reads a whole input in one batch.
+- Checked on 60 validation questions each: BF16, Q8_0 and Q4_K_M files of a letters model, and a Q8_0 Clef file, all
+  gave the same answers as the model they came from (probabilities within 0.001 to 0.013 on average).
+
 ### Several GPUs
 
 - Every GPU you tick trains. Each card holds a whole copy of the model and takes its own share of every batch, and
@@ -145,6 +160,7 @@ fast kernels for linear-attention models such as Qwen3.5. On an R9700 that makes
 | `server/anvil/train.py` | The trainer process; `tasks.py` holds what each kind of model learns and how it's scored |
 | `server/anvil/judge.py` | The judge process: checks checkpoints on a spare GPU; `picking.py` ranks them and decides when to stop |
 | `server/anvil/parallel.py` | Training on several GPUs at once: one process per card, gradients averaged every step |
+| `server/anvil/export.py` | Exporting a version of a run as GGUF with llama.cpp: merge, convert, quantize |
 | `server/anvil/vendor/clef/` | Cloudflare's Clef reference code and licence (Apache-2.0), unmodified; see its `NOTICE.md` |
 | `server/tests/` | `docker compose exec -w /workspace/server dev python -m pytest` |
 | `web/src/` | The React screen: `Finetune.tsx`, `Runs.tsx`, `RunPage.tsx`, `Settings.tsx`, sections in `sections/` |
@@ -163,3 +179,4 @@ Built in steps:
 5. **Several GPUs** (done): every ticked card trains on its share of each batch; checks are shared, or run on a
    free unticked card.
 6. **The Clef head** (done): decision models the Clef way, next to letters, on one GPU or several, with the judge.
+7. **GGUF export** (done): the finished model or any kept checkpoint, as BF16 to Q4_K_M, for llama.cpp and the like.

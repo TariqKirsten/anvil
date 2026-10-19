@@ -206,6 +206,19 @@ export interface RunDetail {
   leaderboard: Leaderboard;
   judge: JudgeStatus | null;
   size: number; // bytes on disk: checkpoints, model, metrics and logs
+  // What can be exported as GGUF (the finished model, kept checkpoints), and the exports so far.
+  versions: { version: string; step: number | null; score: number | null; metric: string | null }[];
+  exports: ExportStatus[];
+  export_params: number | null; // weights in the finished model (and Clef's head), for size estimates
+}
+
+export interface ExportStatus {
+  version: string;
+  state: "starting" | "running" | "done" | "failed";
+  stage: string;
+  quants?: string[];
+  files?: { name: string; size: number }[];
+  error?: string | null;
 }
 
 // server/anvil/picking.py: one entry per validation check; best_step is the checkpoint that becomes the model.

@@ -91,6 +91,17 @@ select.auto {
   width: auto;
 }
 
+input[type="checkbox"],
+input[type="radio"] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 input:focus-visible,
 select:focus-visible,
 button:focus-visible {
@@ -1502,4 +1513,133 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.export-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 640px;
+}
+
+.quant-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.quant {
+  display: grid;
+  grid-template-columns: 16px 76px 72px 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.quant:first-child {
+  border-top: none;
+}
+
+.quant:hover {
+  background: var(--surface-2);
+}
+
+.quant.on {
+  background: var(--accent-bg);
+}
+
+.quant-name {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.quant-size {
+  color: var(--text-2);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.quant-hint {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.export-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 16px 0 6px;
+}
+
+.export-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.export-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.export-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.export-head .hint {
+  margin: 0;
+}
+
+.export-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.export-files li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+
+.export-files li:hover {
+  background: var(--surface-2);
+}
+
+.export-files a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.export-files a:hover {
+  color: var(--accent-text);
+  text-decoration: underline;
+}
+
+.file-size {
+  flex: none;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }

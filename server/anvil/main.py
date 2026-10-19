@@ -343,6 +343,30 @@ def delete_run(run_id: str) -> dict:
         raise HTTPException(409, str(exc)) from exc
 
 
+class ExportBody(BaseModel):
+    version: str
+    quants: list[str]
+
+
+@app.post("/api/runs/{run_id}/exports")
+def start_export(run_id: str, body: ExportBody) -> dict:
+    try:
+        runs.start_export(run_id, body.version, body.quants)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True}
+
+
+@app.get("/api/runs/{run_id}/exports/{version}/{name}")
+def download_export(run_id: str, version: str, name: str):
+    try:
+        return FileResponse(runs.export_file(run_id, version, name), filename=name)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @app.post("/api/runs/{run_id}/stop")
 def stop_run(run_id: str) -> dict:
     try:

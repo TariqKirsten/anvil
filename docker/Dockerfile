@@ -37,9 +37,27 @@ RUN set -eux; cd /tmp; \
         python3 -m pip install --no-cache-dir --no-build-isolation --no-deps .; \
     cd /tmp; rm -rf causal_conv1d-1.7.0 "$f"; python3 -c "import causal_conv1d"
 
+# llama.cpp (MIT) for exporting models as GGUF: its converter writes a full-quality GGUF (Qwen3.5 models, and Clef
+# models with their decision head), llama-quantize shrinks it (Q8_0, Q4_K_M, ...), and llama-cli and llama-server can try
+# the result. Built for the CPU only, since exporting needs no GPU. Release v0.7.0, pinned by checksum. A few minutes.
+ARG LLAMA_CPP=0.7.0
+RUN set -eux; cd /tmp; \
+    python3 -m pip install --no-cache-dir cmake sentencepiece protobuf; \
+    f="llama.cpp-v${LLAMA_CPP}.tar.gz"; \
+    curl -fsSL -o "$f" "https://github.com/ggml-org/llama.cpp/archive/refs/tags/v${LLAMA_CPP}.tar.gz"; \
+    echo "55d67acf3ad2ad747a9bbeb75f9f0e173dbcc0d1753a471038a90c819421c5e1  $f" | sha256sum -c -; \
+    mkdir -p /opt/llama.cpp; tar xzf "$f" -C /opt/llama.cpp --strip-components=1 --no-same-owner; rm -f "$f"; \
+    cd /opt/llama.cpp; \
+    cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DLLAMA_OPENSSL=OFF \
+          -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF; \
+    cmake --build build --target llama-quantize llama-cli llama-server -j 8; \
+    ./build/bin/llama-quantize --help 2>&1 | head -3 || true
+
 ENV PYTHONUNBUFFERED=1 \
     TOKENIZERS_PARALLELISM=false \
-    HF_HUB_DISABLE_TELEMETRY=1
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    LLAMA_CPP_DIR=/opt/llama.cpp \
+    LLAMA_CPP_VERSION=v${LLAMA_CPP}
 WORKDIR /workspace
 
 # The container's default user, "anvil", with your user and group ids (ANVIL_UID/ANVIL_GID in .env), so everything it

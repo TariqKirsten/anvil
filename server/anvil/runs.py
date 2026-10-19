@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, datasets, folders, gpus, models_check, picking
+from . import config, datasets, export, folders, gpus, models_check, picking
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 ACTIVE = {"starting", "loading", "running", "saving"}
@@ -308,7 +308,8 @@ def detail(run_id: str, log_lines: int = 200) -> dict:
         if (path / "checkpoints").exists() else []
     return {"config": _read(path / "config.json", {}), "status": status(run_id), "metrics": metrics, "log": log,
             "checkpoints": ckpts, "model": str(path / "model") if (path / "model").exists() else None,
-            "leaderboard": picking.load(path), "judge": judge_status(run_id), "size": size(path)}
+            "leaderboard": picking.load(path), "judge": judge_status(run_id), "size": size(path),
+            "versions": versions(run_id), "exports": exports(run_id), "export_params": export_params(path)}
 
 
 def _judge_running(run_id: str) -> bool:
@@ -329,6 +330,98 @@ def judge_status(run_id: str) -> dict | None:
     return current
 
 
+# ---------------------------------------------------------------- exporting as GGUF (anvil.export)
+
+def versions(run_id: str) -> list[dict]:
+    """What can be exported: the finished model, and every checkpoint still kept, with its validation score."""
+    path = run_dir(run_id)
+    scores = {e["step"]: e for e in picking.load(path)["entries"]}
+    found = []
+    if (path / "model" / "merged" / "config.json").exists():
+        about = _read(path / "model" / "merged" / "anvil.json", {}) or {}
+        entry = scores.get(about.get("picked_step"))
+        found.append({"version": "final", "step": about.get("picked_step"), "score": entry and entry["score"],
+                      "metric": entry and entry["metric"]})
+    if (path / "checkpoints").exists():
+        for checkpoint in sorted((path / "checkpoints").glob("step-*")):
+            if (checkpoint / "state.json").exists() and export.VERSION.match(checkpoint.name):
+                entry = scores.get(int(checkpoint.name[5:]))
+                found.append({"version": checkpoint.name, "step": int(checkpoint.name[5:]),
+                              "score": entry and entry["score"], "metric": entry and entry["metric"]})
+    return found
+
+
+def export_params(path: Path) -> int | None:
+    """How many weights an export holds: the finished model's own (and Clef's head), for the screen's size estimates.
+    The base repo's count can be larger (Qwen3.5 repos include a vision tower that the text model leaves out)."""
+    merged = path / "model" / "merged"
+    files = list(merged.glob("*.safetensors")) if merged.exists() else []
+    try:
+        return sum(models_check.safetensors_params(f) for f in files) or None
+    except (OSError, ValueError):
+        return None
+
+
+def exports(run_id: str) -> list[dict]:
+    """Every export of this run: how far it got, and the files it made."""
+    path = runs_dir() / run_id / "exports"
+    found = []
+    if path.exists():
+        for folder in sorted(path.iterdir()):
+            current = _read(folder / "status.json")
+            if not current:
+                continue
+            if current.get("state") in ("starting", "running") and not _alive(f"{run_id}:export", current.get("pid")):
+                current.update(state="failed", stage="Failed", error="The export stopped without finishing. The log "
+                                                                       "in its folder may say why; try again.")
+                _write(folder / "status.json", current)
+            found.append({"version": folder.name, **current})
+    return found
+
+
+def _exporting(run_id: str) -> bool:
+    return any(e.get("state") in ("starting", "running") for e in exports(run_id))
+
+
+def start_export(run_id: str, version: str, quants: list[str]) -> None:
+    path = run_dir(run_id)
+    if status(run_id).get("state") in ACTIVE:
+        raise ValueError("This run is still going: export it once it has finished or been stopped.")
+    if version not in {v["version"] for v in versions(run_id)}:
+        raise ValueError("That version of the run doesn't exist (any more).")
+    chosen = [q for q in export.QUANTS if q in set(quants)]
+    if not chosen:
+        raise ValueError("Pick at least one type to export.")
+    if _exporting(run_id):
+        raise ValueError("An export of this run is still going. Wait for it to finish.")
+    folder = path / "exports" / version
+    folder.mkdir(parents=True, exist_ok=True)
+    _write(folder / "request.json", {"quants": chosen, "requested": time.time()})
+    env = {k: v for k, v in os.environ.items() if k not in ("ROCR_VISIBLE_DEVICES",)}
+    env.update(HIP_VISIBLE_DEVICES="", CUDA_VISIBLE_DEVICES="", PYTHONPATH=str(SERVER_DIR), PYTHONUNBUFFERED="1")
+    log = (folder / "log.txt").open("ab")
+    log.write(f"\n===== anvil.export {version} {', '.join(chosen)} {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n".encode())
+    log.flush()
+    _processes[f"{run_id}:export"] = subprocess.Popen(
+        [sys.executable, "-m", "anvil.export", str(path), version], cwd=SERVER_DIR, env=env, stdout=log,
+        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+    log.close()
+    _write(folder / "status.json", {"state": "starting", "stage": "Starting", "quants": chosen,
+                                    "pid": _processes[f"{run_id}:export"].pid, "updated": time.time()})
+
+
+def export_file(run_id: str, version: str, name: str) -> Path:
+    """A finished export's file, for downloading: only .gguf files and anvil.json from that export's own folder."""
+    folder = run_dir(run_id) / "exports" / version
+    if not export.VERSION.match(version) or "/" in name or name.startswith(".") or not (
+            name.endswith(".gguf") or name == "anvil.json"):
+        raise FileNotFoundError("No such file.")
+    file = folder / name
+    if not file.is_file():
+        raise FileNotFoundError("No such file.")
+    return file
+
+
 def delete(run_id: str) -> int:
     """Delete a run with everything it saved: checkpoints, the finished model, metrics and logs. Returns the bytes freed.
     A run that's still training, or whose judge is still checking, has to finish or be stopped first."""
@@ -337,10 +430,13 @@ def delete(run_id: str) -> int:
         raise ValueError("This run is still going. Stop it first, then delete it.")
     if _judge_running(run_id):
         raise ValueError("This run's judge is still checking its last checkpoints. Try again when it's done.")
+    if _exporting(run_id):
+        raise ValueError("This run is being exported. Try again when the export is done.")
     freed = size(path)
     shutil.rmtree(path)
     _processes.pop(run_id, None)
     _processes.pop(f"{run_id}:judge", None)
+    _processes.pop(f"{run_id}:export", None)
     return freed
 
 
