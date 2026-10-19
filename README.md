@@ -102,9 +102,12 @@ every validation check, the final test, the checkpoints and the log.
 - A trainer that crashes in native code (a segfault, or memory corruption in the GPU libraries) starts again by itself
   from the newest checkpoint, losing only the steps since. After three crashes in a row from the same checkpoint it
   gives up and the run fails; Resume tries again.
-- A batch whose loss or gradients aren't numbers (NaN or infinity: a rare overflow, or a glitch in the GPU stack) is
+- A batch whose loss or gradients aren't numbers (NaN or infinity: a rare overflow, or a fault in the machine) is
   skipped on every card, so it can't spoil the weights; the log says which batch, and the run page counts them. After
   20 skipped in a row the run fails instead of skipping forever; Resume continues from the newest checkpoint.
+- Skips that come and go, like crashes in native code, are often the machine rather than the run: when a replay of the
+  same steps from the same checkpoint trains cleanly, test the memory (memtest86+), especially with four DIMMs or a
+  memory overclock (XMP/EXPO).
 - The finished model is in the run's folder: `model/adapter` and `model/merged` (for LoRA), or `model/merged`. Its
   `anvil.json` says which checkpoint it is and what it scored on the test set.
 - **Delete** (on the page of a run that has finished, failed or stopped) removes the run for good: checkpoints, the

@@ -518,9 +518,10 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
             norms = [torch.nn.utils.clip_grad_norm_(params, 1.0) for params in (backbone, head) if params]
             if not group.all(all(torch.isfinite(n) for n in norms)):
                 # The loss was fine but the gradients weren't. Clipping would spread a NaN to every gradient, and the
-                # optimizer into every weight: from then on every loss is NaN and every batch is skipped. Seen once
-                # in 14,000 steps on two R9700s; the same steps replayed from the checkpoint before it trained cleanly,
-                # so most likely a fault in the GPU stack rather than the data or the model's numbers.
+                # optimizer into every weight: from then on every loss is NaN and every batch is skipped. On the
+                # machine this was written on it came and went: two runs with the same weights and the same batch, one
+                # gave infinite gradients and the other didn't. Not the data or the model's numbers, then, but the
+                # machine (most likely its memory, corrupting data under load), which training has to survive.
                 skip("its gradients weren't numbers (" + ", ".join(
                     f"{name} {float(n):.3g}" for name, n in zip(("model", "head"), norms)) + ")")
                 continue
