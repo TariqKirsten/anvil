@@ -99,6 +99,9 @@ every validation check, the final test, the checkpoints and the log.
   text.
 - Checkpoints keep the trainable weights and the optimizer, so **Stop** loses at most one step and **Resume** continues
   exactly where it stopped, after a crash too.
+- A trainer that crashes in native code (a segfault, or memory corruption in the GPU libraries) starts again by itself
+  from the newest checkpoint, losing only the steps since. After three crashes in a row from the same checkpoint it
+  gives up and the run fails; Resume tries again.
 - The finished model is in the run's folder: `model/adapter` and `model/merged` (for LoRA), or `model/merged`. Its
   `anvil.json` says which checkpoint it is and what it scored on the test set.
 - **Delete** (on the page of a run that has finished, failed or stopped) removes the run for good: checkpoints, the

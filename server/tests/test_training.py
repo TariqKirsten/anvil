@@ -83,13 +83,16 @@ def run_config(model: Path, data: Path, train_as="decision", fmt="decision", eve
             "checkpoints": {"every": every, "keepBest": 3, "patience": 3, "pickBy": "auroc"}, "created": time.time()}
 
 
-def start(run_dir: Path, resume=False, cards=1) -> subprocess.Popen:
-    """The trainer, as the server starts it; several "cards" are several CPU processes (gloo instead of RCCL)."""
+def start(run_dir: Path, resume=False, cards=1, supervised=False) -> subprocess.Popen:
+    """The trainer, as the server starts it; several "cards" are several CPU processes (gloo instead of RCCL).
+    supervised: under anvil.supervisor, which starts it again if it crashes."""
     env = {**os.environ, "ANVIL_DEVICE": "cpu", "HIP_VISIBLE_DEVICES": "", "CUDA_VISIBLE_DEVICES": "",
            "PYTHONPATH": str(SERVER), "OMP_NUM_THREADS": "2"}
     log = (run_dir / "log.txt").open("ab")
-    return subprocess.Popen(runs.command("anvil.train", run_dir, cards, ["--resume"] if resume else []),
-                            env=env, stdout=log, stderr=subprocess.STDOUT)
+    cmd = runs.command("anvil.train", run_dir, cards, ["--resume"] if resume else [])
+    if supervised:
+        cmd = [sys.executable, "-m", "anvil.supervisor", str(run_dir), "--", *cmd]
+    return subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
 
 
 def make_run(tmp: Path, cfg: dict, name: str = "run") -> Path:
@@ -144,6 +147,27 @@ def test_stop_saves_a_checkpoint_and_resume_finishes(tmp_path, tiny_model):
     done = finish(start(run_dir, resume=True), run_dir)
     assert done["state"] == "done" and done["step"] == 400
     assert any(m["type"] == "resume" and m["step"] == stopped["step"] for m in metrics(run_dir))
+
+
+def test_a_trainer_that_crashes_starts_again_from_its_newest_checkpoint(tmp_path, tiny_model):
+    data = prepared(tmp_path, decision_rows(400), decision_rows(8, seed=1))
+    cfg = run_config(tiny_model, data, maxSteps=400, every=5)
+    cfg["checkpoints"].update(patience=0)
+    run_dir = make_run(tmp_path, cfg)
+    proc = start(run_dir, supervised=True)
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        status = json.loads((run_dir / "status.json").read_text()) if (run_dir / "status.json").exists() else {}
+        if status.get("state") == "running" and status.get("step", 0) >= 12:
+            break
+        time.sleep(0.05)
+    os.kill(status["pid"], signal.SIGKILL)  # as a crash in native code would: no chance to say how it ended
+    done = finish(proc, run_dir)
+    assert done["state"] == "done" and done["step"] == 400 and done["crashes"] == 1, done
+    restart = done["last_crash"]["from"]
+    assert restart >= 10 and restart % 5 == 0
+    assert any(m["type"] == "resume" and m["step"] == restart for m in metrics(run_dir))
+    assert "restarting from the step-" in (run_dir / "log.txt").read_text()
 
 
 def test_a_chat_run_learns_only_the_assistant(tmp_path, tiny_model):
@@ -293,6 +317,23 @@ def test_a_judge_still_checking_after_stop_keeps_its_card_and_serves_the_resume(
     runs.resume(run_id, None)
     assert run_settings[-1] == (run_id, [1], None)  # no second judge: the one still running carries on
     assert json.loads((path / "config.json").read_text())["judge_gpu"] == 0
+
+
+def test_a_crashed_trainer_still_runs_while_its_supervisor_starts_it_again(run_settings):
+    run_id = runs.create(FORM, {"train": {}}, None)
+    path = config.settings.data / "runs" / run_id
+    # Stands in for the supervisor: what the server checks is its command line, which names the module and the run.
+    supervisor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "anvil.supervisor", str(path)])
+    try:
+        (path / "status.json").write_text(json.dumps({"state": "running", "step": 40, "pid": 999_999_999,
+                                                      "supervisor": supervisor.pid}))
+        assert runs.status(run_id)["state"] == "running"  # the trainer is gone, but not the run
+        assert run_id in runs.busy_gpus().values()  # its cards stay taken for the restart
+        runs.stop(run_id)  # the trainer can't hear it: the supervisor does, and starts nothing new
+        assert supervisor.wait(timeout=10) == -signal.SIGTERM
+        assert runs.status(run_id)["state"] == "failed"  # with neither left, the run is over
+    finally:
+        supervisor.kill()
 
 
 def test_deleting_a_run_removes_everything_it_saved(run_settings):

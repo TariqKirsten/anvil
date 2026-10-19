@@ -57,6 +57,10 @@ def _alive(run_id: str, pid: int | None) -> bool:
     proc = _processes.get(run_id)
     if proc is not None:
         return proc.poll() is None  # poll() also reaps the finished process
+    return _pid_alive(pid)
+
+
+def _pid_alive(pid: int | None) -> bool:
     if not pid:
         return False
     try:
@@ -68,11 +72,31 @@ def _alive(run_id: str, pid: int | None) -> bool:
         return True
 
 
+def _supervising(pid: int | None, path: Path) -> bool:
+    """Whether pid is the supervisor of the run in path. Its number may have gone to another process since."""
+    if not pid:
+        return False
+    try:
+        args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    return b"anvil.supervisor" in args and str(path).encode() in args
+
+
+def _running(run_id: str, st: dict) -> bool:
+    """Whether a run's processes are still going: the trainer, or its supervisor, which outlives a crashed trainer to
+    start it again (anvil.supervisor)."""
+    proc = _processes.get(run_id)
+    if proc is not None and proc.poll() is None:  # poll() also reaps the finished process
+        return True
+    return _pid_alive(st.get("pid")) or _supervising(st.get("supervisor"), runs_dir() / run_id)
+
+
 def status(run_id: str) -> dict:
     """The run's status, corrected when its process died without saying so (a crash, or the container restarting)."""
     path = runs_dir() / run_id / "status.json"
     current = _read(path, {}) or {}
-    if current.get("state") in ACTIVE and not _alive(run_id, current.get("pid")):
+    if current.get("state") in ACTIVE and not _running(run_id, current):
         current.update(state="failed", stage="Failed", eta_s=None,
                        error="The training process ended without finishing. The log may say why; "
                              "Resume continues from the last checkpoint.")
@@ -255,9 +279,12 @@ def _start(module: str, key: str, path: Path, cards: list[int], token: str | Non
     log.write(f"\n===== {module} {'resumed' if '--resume' in args else 'started'} "
               f"{time.strftime('%Y-%m-%d %H:%M:%S')} on {where} =====\n".encode())
     log.flush()
+    cmd = command(module, path, len(cards), args)
+    if module == "anvil.train":  # started again from its newest checkpoint if it crashes in native code
+        cmd = [sys.executable, "-m", "anvil.supervisor", str(path), "--", *cmd]
     _processes[key] = subprocess.Popen(
-        command(module, path, len(cards), args), cwd=SERVER_DIR, env=env, stdout=log,
-        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+        cmd, cwd=SERVER_DIR, env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        start_new_session=True)
     log.close()
     return _processes[key].pid
 
@@ -266,7 +293,7 @@ def _spawn(run_id: str, path: Path, gpus: list[int], token: str | None, resume: 
            judge_gpu: int | None = None) -> None:
     pid = _start("anvil.train", run_id, path, gpus, token, path / "log.txt", ["--resume"] if resume else [])
     current = _read(path / "status.json", {}) or {}
-    current.update(state="starting", stage="Starting", pid=pid, error=None, updated=time.time())
+    current.update(state="starting", stage="Starting", pid=pid, supervisor=pid, error=None, updated=time.time())
     _write(path / "status.json", current)
     if judge_gpu is not None:
         (path / "judge").mkdir(exist_ok=True)
@@ -464,7 +491,12 @@ def stop(run_id: str) -> None:
     st = status(run_id)
     if st.get("state") not in ACTIVE:
         raise ValueError("This run isn't running.")
-    os.kill(int(st["pid"]), signal.SIGTERM)  # the trainer saves a checkpoint after the current step, then exits
+    try:
+        os.kill(int(st["pid"]), signal.SIGTERM)  # the trainer saves a checkpoint after the current step, then exits
+    except ProcessLookupError:
+        if not _supervising(st.get("supervisor"), path):
+            raise
+        os.kill(int(st["supervisor"]), signal.SIGTERM)  # the trainer just crashed: its supervisor won't start it again
     st.update(stage="Stopping after this step", updated=time.time())
     _write(path / "status.json", st)
 

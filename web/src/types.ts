@@ -200,6 +200,8 @@ export interface RunStatus {
   early_stop?: string | null;
   final_test?: (Scores & { step: number; rows?: number }) | null;
   training_finished?: boolean;
+  crashes?: number; // times the trainer crashed in native code and started again (anvil.supervisor)
+  last_crash?: { at: number; step: number; from: number | null } | null;
 }
 
 export type RunMetric = Scores & {

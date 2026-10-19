@@ -381,6 +381,13 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           </p>
         )}
         {st.state === "stopped" && <p className="hint">Stopped at step {st.step}. Resume continues from the last checkpoint.</p>}
+        {!!st.crashes && st.last_crash && st.state !== "failed" && (
+          <p className="warn-text">
+            {st.crashes === 1 ? "The trainer crashed " : `The trainer has crashed ${st.crashes} times, the last `}
+            {st.last_crash.step ? `after step ${st.last_crash.step.toLocaleString()}` : "while starting"}, and restarted
+            from {st.last_crash.from != null ? `the step-${st.last_crash.from.toLocaleString()} checkpoint` : "the start"}.
+          </p>
+        )}
         {!!st.skipped && <p className="warn-text">{st.skipped} batches were skipped because their loss wasn't a number.</p>}
       </section>
 
