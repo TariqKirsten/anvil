@@ -71,6 +71,37 @@ function num(v: unknown, digits = 3) {
   return typeof v === "number" ? v.toFixed(digits) : "–";
 }
 
+// "14:35": when a Stop under way ends the trainer outright.
+function clock(seconds: number) {
+  return new Date(seconds * 1000).toLocaleTimeString(undefined, { timeStyle: "short" });
+}
+
+// What Stop does from where the trainer is (next), and what ending it outright costs: while it trains, the steps since
+// the newest checkpoint. Before it trains it stops once loaded, and once training is over it finishes instead.
+function stopPlan(st: RunDetail["status"], newest: number | null) {
+  if (st.state === "starting" || st.state === "loading")
+    return { next: "Stopping: the trainer stops once it has loaded, before it trains.", until: "stopped",
+             cost: "It hasn't trained since the last checkpoint, so nothing is lost." };
+  if (st.training_finished)
+    return { next: "Training is over, and the run finishes (the final test, then saving the model) rather than stop.",
+             until: "finished", cost: "Resume then finishes it from the newest checkpoint." };
+  return { next: "Stopping after this step: the trainer saves a checkpoint, then stops.", until: "stopped",
+           cost: newest != null
+             ? `The steps since the step-${newest.toLocaleString()} checkpoint are lost: Resume continues from there and trains them again.`
+             : "Nothing has been saved yet, so Resume starts from the beginning." };
+}
+
+// A run stopped without saving: the trainer was ended, or died, before it got to the end of its step.
+function endedLine(ended: NonNullable<RunDetail["status"]["ended"]>) {
+  const at = `Stopped at step ${ended.step.toLocaleString()}`;
+  if (ended.from == null)
+    return `${at} without saving: the trainer was ended before it finished its step, and there's no checkpoint yet, so Resume starts from the beginning.`;
+  const from = `the step-${ended.from.toLocaleString()} checkpoint`;
+  return ended.step > ended.from
+    ? `${at} without saving: the trainer was ended before it finished its step. Resume continues from ${from} and trains the steps after it again.`
+    : `${at}: the trainer was ended before it finished its step. Resume continues from ${from}.`;
+}
+
 export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) {
   const [run, setRun] = useState<RunDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -87,7 +118,11 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   const boxRef = useRef<HTMLFormElement>(null);
   const wasContinuing = useRef(false);
   const logRef = useRef<HTMLPreElement>(null);
+  const stopRef = useRef<HTMLDivElement>(null);
+  const stopPressed = useRef(false);
   const active = run ? ACTIVE.has(run.status.state) : true;
+  // Stop pressed, and the trainer hasn't stopped yet.
+  const stopping = run && active ? run.status.stopping ?? null : null;
   const exporting = !!run?.exports.some((e) => e.state === "starting" || e.state === "running");
   const polling = active || exporting;
 
@@ -114,6 +149,14 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
     if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 80) el.scrollTop = el.scrollHeight;
   }, [run?.log]);
 
+  // The Stop button gives way to the stopping box, and focus goes to the box (not to its Stop now, which a second press
+  // of the key would set off).
+  const isStopping = !!stopping;
+  useEffect(() => {
+    if (isStopping && stopPressed.current) stopRef.current?.focus();
+    stopPressed.current = false;
+  }, [isStopping]);
+
   // The Keep training button gives way to its box: focus goes into the box, and back to the button on Cancel.
   useEffect(() => {
     if (continuing) boxRef.current?.querySelector("button")?.focus();
@@ -121,10 +164,12 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
     wasContinuing.current = continuing;
   }, [continuing]);
 
-  async function act(what: "stop" | "resume") {
+  // now: Stop now, which ends the trainer at once instead of after this step.
+  async function act(what: "stop" | "resume", now = false) {
     setActing(true);
     try {
-      await api(`/api/runs/${id}/${what}`, { method: "POST" });
+      await api(`/api/runs/${id}/${what}`, now ? { json: { now: true } } : { method: "POST" });
+      stopPressed.current = what === "stop" && !now;
       setRun(await api<RunDetail>(`/api/runs/${id}`));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -187,6 +232,10 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   const test = st.final_test;
   const cards = cfg.gpus ?? [cfg.gpu];
   const epoch = epochLine(st);
+  const plan = stopPlan(st, newest);
+  // While stopping, the trainer's own stage says it's training; a save it's in the middle of still shows.
+  const stage = !stopping || st.saving_since ? st.stage : stopping.ending ? "Ending the trainer"
+    : st.state === "running" && !st.training_finished ? "Stopping after this step" : st.stage;
   const pct = st.total ? Math.min(100, (st.step / st.total) * 100) : 0;
   // A failed run never gets a finish time, so its last update stands in for one.
   const end = st.finished ?? st.stopped ?? (ACTIVE.has(st.state) ? Date.now() / 1000 : st.updated);
@@ -263,9 +312,9 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
             </p>
           </div>
           <div className="run-actions">
-            <Badge tone={stateTone(st.state)}>{STATE_LABEL[st.state] ?? st.state}</Badge>
-            {ACTIVE.has(st.state) && (
-              <button type="button" onClick={() => act("stop")}>
+            <Badge tone={stateTone(st.state, !!stopping)}>{stopping ? "Stopping" : STATE_LABEL[st.state] ?? st.state}</Badge>
+            {ACTIVE.has(st.state) && !stopping && (
+              <button type="button" disabled={acting} onClick={() => act("stop")}>
                 <IconPlayerStop size={16} aria-hidden /> {acting ? "Stopping…" : "Stop"}
               </button>
             )}
@@ -338,11 +387,32 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           </form>
         )}
 
+        {stopping && (
+          <div ref={stopRef} tabIndex={-1} className="stop-box" role="status">
+            {stopping.ending ? (
+              <p>
+                {st.saving_since ? "Ending the trainer as soon as it has finished saving." : `Ending the trainer. ${plan.cost}`}
+              </p>
+            ) : (
+              <>
+                <p>
+                  {plan.next} If it hasn't {plan.until} by {clock(stopping.end_by)} (stuck in a GPU call, say), it's
+                  ended outright then.
+                </p>
+                <p>Stop now ends it at once instead. {plan.cost}</p>
+                <button type="button" className="danger" disabled={acting} onClick={() => act("stop", true)}>
+                  <IconPlayerStop size={16} aria-hidden /> {acting ? "Ending…" : "Stop now"}
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
         <div className="run-bar">
           <div className="bar big"><div style={{ width: `${pct}%` }} /></div>
           <span>
-            {st.total ? `Step ${st.step.toLocaleString()} of ${st.total.toLocaleString()}` : st.stage}
-            {ACTIVE.has(st.state) && st.total ? ` · ${st.stage}` : ""}
+            {st.total ? `Step ${st.step.toLocaleString()} of ${st.total.toLocaleString()}` : stage}
+            {ACTIVE.has(st.state) && st.total ? ` · ${stage}` : ""}
           </span>
           {epoch && (
             <span>
@@ -355,7 +425,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
 
         <div className="stats">
           <div><span className="stat-label">{ACTIVE.has(st.state) ? "Time so far" : "Time taken"}</span><span className="stat-value">{duration(elapsed)}</span></div>
-          <div><span className="stat-label">Time left</span><span className="stat-value">{ACTIVE.has(st.state) ? duration(st.eta_s) : "–"}</span></div>
+          <div><span className="stat-label">Time left</span><span className="stat-value">{ACTIVE.has(st.state) && !stopping ? duration(st.eta_s) : "–"}</span></div>
           <div><span className="stat-label">Speed</span><span className="stat-value">{st.tokens_per_s ? `${Math.round(st.tokens_per_s).toLocaleString()} tok/s` : "–"}</span></div>
           <div><span className="stat-label">{cards.length > 1 ? "GPU memory (peak, per card)" : "GPU memory (peak)"}</span><span className="stat-value">{st.peak_mem_gb ? `${st.peak_mem_gb} GB` : "–"}</span></div>
         </div>
@@ -387,7 +457,9 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
             {canContinue && " Keep training carries on from the newest checkpoint if you'd rather wait longer."}
           </p>
         )}
-        {st.state === "stopped" && <p className="hint">Stopped at step {st.step}. Resume continues from the last checkpoint.</p>}
+        {st.state === "stopped" && (st.ended
+          ? <p className="warn-text">{endedLine(st.ended)}</p>
+          : <p className="hint">Stopped at step {st.step.toLocaleString()}. Resume continues from the last checkpoint.</p>)}
         {!!st.crashes && st.last_crash && st.state !== "failed" && (
           <p className="warn-text">
             {st.crashes === 1 ? "The trainer crashed " : `The trainer has crashed ${st.crashes} times, the last `}

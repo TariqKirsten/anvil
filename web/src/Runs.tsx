@@ -42,10 +42,11 @@ const SHORT_LABEL: Record<string, string> = {
   val_loss: "val loss",
 };
 
-export function stateTone(state: RunState): "ok" | "warn" | "bad" | "accent" | "neutral" {
+// stopping: Stop was pressed and the trainer hasn't stopped yet.
+export function stateTone(state: RunState, stopping = false): "ok" | "warn" | "bad" | "accent" | "neutral" {
   if (state === "done") return "ok";
   if (state === "failed") return "bad";
-  if (state === "stopped") return "warn";
+  if (state === "stopped" || stopping) return "warn";
   return "accent";
 }
 
@@ -113,7 +114,7 @@ export function Runs({ onLogout }: { onLogout: () => void }) {
                     </span>
                   )}
                 </span>
-                <Badge tone={stateTone(r.state)}>{STATE_LABEL[r.state] ?? r.state}</Badge>
+                <Badge tone={stateTone(r.state, r.stopping)}>{r.stopping ? "Stopping" : STATE_LABEL[r.state] ?? r.state}</Badge>
               </a>
             );
           })}

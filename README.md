@@ -99,6 +99,10 @@ every validation check, the final test, the checkpoints and the log.
   text.
 - Checkpoints keep the trainable weights and the optimizer, so **Stop** loses at most one step and **Resume** continues
   exactly where it stopped, after a crash too.
+- A trainer that can't get to the end of its step after Stop (stuck in a GPU collective or other native code) is ended
+  outright 10 minutes later, or at once with **Stop now**, which the run page offers while it waits. That loses the
+  steps since the newest checkpoint, which Resume trains again. A checkpoint being saved always gets to finish, and a
+  run you've stopped is never started again by itself, even if its trainer crashes after Stop.
 - A trainer that crashes in native code (a segfault, or memory corruption in the GPU libraries) starts again by itself
   from the newest checkpoint, losing only the steps since. After three crashes in a row from the same checkpoint it
   gives up and the run fails; Resume tries again.
@@ -136,7 +140,7 @@ every validation check, the final test, the checkpoints and the log.
   `anvil/parallel.py`). Batch size is per card, so two cards learn from twice the rows per step and an epoch takes
   half the steps.
 - Process 0 runs on a card that doesn't drive a screen if there is one. It writes the run's files, saves checkpoints
-  and finishes the run; Stop reaches it, and the cards agree every step on whether to stop.
+  and finishes the run. Stop reaches every card, and they agree every step on whether to stop.
 - A free GPU you didn't tick becomes the judge (below). Without one, the training cards pause at each checkpoint and
   check it together, each scoring its share of the validation rows. Untick "Use GPU N for checks" to keep that card
   free, for another run say: two experiments side by side, one per card.

@@ -162,6 +162,7 @@ export interface RunSummary {
   gpus: number[];
   created: number;
   state: RunState;
+  stopping: boolean; // Stop was pressed and the trainer hasn't stopped yet
   stage: string;
   step: number;
   total: number | null;
@@ -203,6 +204,13 @@ export interface RunStatus {
   warm_until?: number; // the model has warmed up by this step: early stopping counts the checks after it
   crashes?: number; // times the trainer crashed in native code and started again (anvil.supervisor)
   last_crash?: { at: number; step: number; from: number | null } | null;
+  saving_since?: number | null; // the trainer is saving a checkpoint (or the model): Stop never cuts that off
+  // While Stop is under way: when it was pressed, and when the trainer is ended outright if it hasn't stopped by itself
+  // (ending: that time has come; Stop now brings it forward).
+  stopping?: { requested: number; end_by: number; ending: boolean };
+  // Stopped without saving: the trainer was ended (or died) after Stop before it got to its checkpoint. from: where
+  // Resume picks up (null: the beginning).
+  ended?: { at: number; step: number; from: number | null } | null;
 }
 
 export type RunMetric = Scores & {

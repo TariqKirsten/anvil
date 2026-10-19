@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from anvil import config, runs, tasks
+from anvil import config, runs, supervisor, tasks
 
 SERVER = Path(__file__).resolve().parents[1]
 LETTER_LINE = " ".join(f"{c}." for c in tasks.LETTERS) + " " + " ".join(tasks.LETTERS)
@@ -111,6 +111,36 @@ def metrics(run_dir: Path) -> list[dict]:
     return [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
 
 
+def served(tmp: Path, monkeypatch, cfg: dict, run_id: str) -> Path:
+    """A run in the server's runs folder, which runs._spawn starts as the server does (under the supervisor, which is
+    what Stop and Resume talk to), only on the CPU."""
+    monkeypatch.setattr(config, "settings", config.Settings(password="x", data=tmp / "data", hf_token=None))
+    monkeypatch.setattr(runs, "_processes", {})
+
+    def start_on_the_cpu(module, key, path, cards, token, log_path, args):
+        runs._processes[key] = start(path, resume="--resume" in args, cards=len(cards), supervised=True)
+        return runs._processes[key].pid
+
+    monkeypatch.setattr(runs, "_start", start_on_the_cpu)
+    (tmp / "data" / "runs").mkdir(parents=True)
+    return make_run(tmp / "data" / "runs", cfg, run_id)
+
+
+def wait_until(run_dir: Path, check, timeout=180) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status = json.loads((run_dir / "status.json").read_text()) if (run_dir / "status.json").exists() else {}
+        if check(status):
+            return status
+        time.sleep(0.05)
+    raise AssertionError(f"timed out: {status}")
+
+
+def gone(pid: int) -> bool:
+    found = supervisor._stat(pid)
+    return found is None or found[1] == "Z"
+
+
 # ---------------------------------------------------------------- end to end
 
 def test_a_decision_run_trains_checkpoints_and_saves(tmp_path, tiny_model):
@@ -147,6 +177,35 @@ def test_stop_saves_a_checkpoint_and_resume_finishes(tmp_path, tiny_model):
     done = finish(start(run_dir, resume=True), run_dir)
     assert done["state"] == "done" and done["step"] == 400
     assert any(m["type"] == "resume" and m["step"] == stopped["step"] for m in metrics(run_dir))
+
+
+def test_stop_ends_a_trainer_that_cant_finish_its_step_and_resume_finishes(tmp_path, tiny_model, monkeypatch):
+    data = prepared(tmp_path, decision_rows(400), decision_rows(8, seed=1))
+    run_dir = served(tmp_path, monkeypatch, run_config(tiny_model, data, maxSteps=400, every=1000), "wedged")
+    runs._spawn("wedged", run_dir, [0], None, resume=False)
+    wait_until(run_dir, lambda st: st.get("state") == "running" and st.get("step", 0) >= 3)
+    runs.stop("wedged")  # through the supervisor: the trainer saves after this step and stops by itself
+    stopped = finish(runs._processes["wedged"], run_dir)
+    assert stopped["state"] == "stopped" and not stopped.get("ended"), stopped
+    saved = stopped["step"]
+    assert (run_dir / "checkpoints" / f"step-{saved:07d}" / "state.json").exists()
+
+    runs.resume("wedged", None)
+    st = wait_until(run_dir, lambda st: st.get("state") == "running" and st.get("step", 0) >= saved + 6)
+    os.kill(st["pid"], signal.SIGSTOP)  # wedged, as in a GPU call: it can't act on anything but SIGKILL now
+    monkeypatch.setattr(supervisor, "STOP_GRACE_S", 3)
+    runs.stop("wedged")
+    stopping = runs.status("wedged")["stopping"]
+    assert not stopping["ending"] and stopping["end_by"] == pytest.approx(stopping["requested"] + 3)
+    ended = finish(runs._processes["wedged"], run_dir)  # once the wait has run out, the supervisor ends it
+    assert ended["state"] == "stopped" and "crashes" not in ended, ended
+    assert ended["ended"]["from"] == saved and ended["ended"]["step"] > saved
+    assert ended["ended"]["at"] >= stopping["requested"] + 3 and gone(st["pid"])
+
+    runs.resume("wedged", None)  # from the newest checkpoint: the steps since are trained again
+    done = finish(runs._processes["wedged"], run_dir)
+    assert done["state"] == "done" and done["step"] == 400, done
+    assert [m["step"] for m in metrics(run_dir) if m["type"] == "resume"] == [saved, saved]
 
 
 def test_a_trainer_that_crashes_starts_again_from_its_newest_checkpoint(tmp_path, tiny_model):
@@ -381,17 +440,41 @@ def test_a_crashed_trainer_still_runs_while_its_supervisor_starts_it_again(run_s
     run_id = runs.create(FORM, {"train": {}}, None)
     path = config.settings.data / "runs" / run_id
     # Stands in for the supervisor: what the server checks is its command line, which names the module and the run.
-    supervisor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "anvil.supervisor", str(path)])
+    stand_in = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "anvil.supervisor", str(path)])
     try:
         (path / "status.json").write_text(json.dumps({"state": "running", "step": 40, "pid": 999_999_999,
-                                                      "supervisor": supervisor.pid}))
+                                                      "supervisor": stand_in.pid}))
         assert runs.status(run_id)["state"] == "running"  # the trainer is gone, but not the run
         assert run_id in runs.busy_gpus().values()  # its cards stay taken for the restart
         runs.stop(run_id)  # the trainer can't hear it: the supervisor does, and starts nothing new
-        assert supervisor.wait(timeout=10) == -signal.SIGTERM
-        assert runs.status(run_id)["state"] == "failed"  # with neither left, the run is over
+        assert stand_in.wait(timeout=10) == -signal.SIGTERM
+        assert runs.status(run_id)["state"] == "stopped"  # with neither left the run is over, stopped as asked
     finally:
-        supervisor.kill()
+        stand_in.kill()
+
+
+def test_stop_reaches_process_0_and_stop_now_the_supervisor_as_runs_from_before_understand(run_settings):
+    # The supervisor reads stop.json, but one started before it did would pass a SIGTERM of its own on to torchrun,
+    # which kills the cards 30 s later, perhaps in the middle of a save: Stop goes to process 0, as it always has.
+    run_id = runs.create(FORM, {"train": {}}, None)
+    path = config.settings.data / "runs" / run_id
+    trainer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    stand_in = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "anvil.supervisor", str(path)])
+    try:
+        (path / "status.json").write_text(json.dumps({"state": "running", "step": 40, "pid": trainer.pid,
+                                                      "supervisor": stand_in.pid}))
+        runs.stop(run_id)
+        assert trainer.wait(timeout=10) == -signal.SIGTERM and stand_in.poll() is None
+        asked = json.loads((path / "stop.json").read_text())
+        assert asked["end_by"] == pytest.approx(asked["requested"] + supervisor.STOP_GRACE_S)
+        runs.stop(run_id, now=True)  # an old supervisor ends a wedged run of several cards through torchrun
+        assert stand_in.wait(timeout=10) == -signal.SIGTERM
+        assert json.loads((path / "stop.json").read_text())["end_by"] <= time.time()
+        st = runs.status(run_id)  # gone after Stop without saying so: stopped, not failed
+        assert st["state"] == "stopped" and st["ended"]["step"] == 40 and st["ended"]["from"] is None, st
+    finally:
+        trainer.kill()
+        stand_in.kill()
 
 
 def test_deleting_a_run_removes_everything_it_saved(run_settings):
@@ -654,13 +737,49 @@ def test_two_cards_stop_together_and_resume(tmp_path, tiny_model):
         if status.get("state") == "running" and status.get("step", 0) >= 3:
             break
         time.sleep(0.05)
-    os.kill(status["pid"], signal.SIGTERM)  # what Stop does: the signal reaches process 0 only
+    os.kill(status["pid"], signal.SIGTERM)  # reaching process 0 only (from a shell, say), it stops every card
     stopped = finish(proc, run_dir)
     assert stopped["state"] == "stopped" and 3 <= stopped["step"] < 200, stopped
     state = json.loads((run_dir / "checkpoints" / f"step-{stopped['step']:07d}" / "state.json").read_text())
     assert state["world"] == 2
     done = finish(start(run_dir, resume=True, cards=2), run_dir)
     assert done["state"] == "done" and done["step"] == 200
+
+
+def test_two_cards_one_wedged_stop_now_ends_them_all_and_resume_finishes(tmp_path, tiny_model, monkeypatch):
+    data = prepared(tmp_path, decision_rows(400), decision_rows(8, seed=1))
+    cfg = {**run_config(tiny_model, data, batchSize=2, maxSteps=200, every=1000), "gpus": [0, 1]}
+    run_dir = served(tmp_path, monkeypatch, cfg, "wedged")
+    runs._spawn("wedged", run_dir, [0, 1], None, resume=False)
+    wait_until(run_dir, lambda st: st.get("state") == "running" and st.get("step", 0) >= 3)
+    runs.stop("wedged")  # the supervisor passes it to each card's process, and they stop together
+    stopped = finish(runs._processes["wedged"], run_dir)
+    assert stopped["state"] == "stopped" and not stopped.get("ended"), stopped
+    saved = stopped["step"]
+    assert json.loads((run_dir / "checkpoints" / f"step-{saved:07d}" / "state.json").read_text())["world"] == 2
+
+    runs.resume("wedged", None)
+    st = wait_until(run_dir, lambda st: st.get("state") == "running" and st.get("step", 0) >= saved + 6)
+    procs = supervisor._processes()
+    torchrun = next(pid for pid, (parent, _, _) in procs.items() if parent == runs._processes["wedged"].pid)
+    cards = [pid for pid, (parent, _, _) in procs.items() if parent == torchrun]
+    assert st["pid"] in cards and len(cards) == 2
+    # The other card wedges, as a hung GPU would: process 0 waits for it in the next collective, which it can't leave
+    # to act on Stop (for 30 minutes, until the collective times out).
+    os.kill(next(pid for pid in cards if pid != st["pid"]), signal.SIGSTOP)
+    runs.stop("wedged")
+    with pytest.raises(subprocess.TimeoutExpired):
+        runs._processes["wedged"].wait(timeout=3)
+    assert runs.status("wedged")["stopping"]["ending"] is False
+    runs.stop("wedged", now=True)  # the second press
+    ended = finish(runs._processes["wedged"], run_dir)
+    assert ended["state"] == "stopped" and ended["ended"]["from"] == saved and "crashes" not in ended, ended
+    assert all(gone(pid) for pid in [torchrun, *cards])
+
+    runs.resume("wedged", None)
+    done = finish(runs._processes["wedged"], run_dir)
+    assert done["state"] == "done" and done["step"] == 200, done
+    assert [m["step"] for m in metrics(run_dir) if m["type"] == "resume"] == [saved, saved]
 
 
 def test_two_cards_stop_early_together(tmp_path, tiny_model):

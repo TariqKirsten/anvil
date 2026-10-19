@@ -367,10 +367,14 @@ def download_export(run_id: str, version: str, name: str):
         raise HTTPException(404, str(exc)) from exc
 
 
+class StopBody(BaseModel):
+    now: bool = False  # Stop now: end the trainer at once, not after this step (losing the steps since its checkpoint)
+
+
 @app.post("/api/runs/{run_id}/stop")
-def stop_run(run_id: str) -> dict:
+def stop_run(run_id: str, body: StopBody | None = None) -> dict:
     try:
-        runs.stop(run_id)
+        runs.stop(run_id, now=bool(body and body.now))
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except (ValueError, ProcessLookupError) as exc:

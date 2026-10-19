@@ -14,7 +14,9 @@ torchrun (see anvil.parallel). It reads the run's config.json, trains, and repor
 Checks run here, pausing training briefly, unless the run has a judge (anvil.judge) on a spare GPU: then this process
 only saves checkpoints, and watches the leaderboard the judge fills to know when to stop early.
 
-Stop sends SIGTERM: the run saves a checkpoint after the current step and exits, so stopping loses at most one step.
+Stop sends SIGTERM (anvil.supervisor passes it to every card's process): the run saves a checkpoint after the current
+step and exits, so stopping loses at most one step. One that can't get to the end of its step, wedged in a GPU call, is
+ended outright by the supervisor, but never while saving_since in the status says it's saving.
 """
 
 from __future__ import annotations
@@ -450,12 +452,12 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     def checkpoint() -> None:
         if not group.main:  # the copies are identical, so process 0 saves for every card
             return
-        report.update(stage="Saving a checkpoint")
+        report.update(stage="Saving a checkpoint", saving_since=time.time())
         save_checkpoint(run_dir, model, tok, opt, sched, {"step": step, "epoch": epoch, "batch_index": batch_index,
                                                           "world": world, "saved": time.time()}, lora, task)
         if not judged_elsewhere:  # with a judge, the judge keeps the best and deletes the rest
             prune(run_dir, picking.keep(board, keep_best, [step_of(p) for p in checkpoints(run_dir)]))
-        report.update(stage=training(), checkpoints=[p.name for p in checkpoints(run_dir)])
+        report.update(stage=training(), saving_since=None, checkpoints=[p.name for p in checkpoints(run_dir)])
 
     def early_stop_reason() -> str | None:
         return picking.stop_reason(picking.load(run_dir) if judged_elsewhere else board, patience, count_after)
@@ -531,7 +533,7 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
             step += 1
             in_a_row = 0
             batch_index = bi + 1
-            # The cards agree, every step, on whether to stop (Stop reaches process 0 only) and on the loss and tokens.
+            # Every step the cards agree on whether to stop (Stop may reach one card first) and on the loss and tokens.
             judge_says = early_stop_reason() if group.main and judged_elsewhere else None
             agreed = group.sum([STOP["requested"], judge_says is not None, *mine])
             stop = agreed[0] > 0
@@ -641,7 +643,8 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
         final_test = {"step": best, **task.evaluate(model, test_items, test_parsed, batch, autocast)}
         report.metric({"type": "test", **final_test})
 
-    report.update(state="saving", stage="Saving the model", final_test=final_test, best_step=best)
+    report.update(state="saving", stage="Saving the model", saving_since=time.time(), final_test=final_test,
+                  best_step=best)
     out = run_dir / "model"
     shutil.rmtree(out, ignore_errors=True)
     about = {"train_as": cfg["train_as"], "method": cfg["method"], "format": cfg["data"]["format"],
@@ -662,7 +665,7 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
     task.save(out / "merged")
     write_json(out / "merged" / "anvil.json", about)
     report.update(state="done", stage="Done", step=step, finished=time.time(), model=str(out), early_stop=early,
-                  checkpoints=[p.name for p in checkpoints(run_dir)])
+                  saving_since=None, checkpoints=[p.name for p in checkpoints(run_dir)])
     print(f"saved the step-{best} checkpoint to {out}", flush=True)
 
 
@@ -686,7 +689,7 @@ def main() -> None:
         _quiet_libraries()
     signal.signal(signal.SIGTERM, _ask_to_stop)
     signal.signal(signal.SIGINT, _ask_to_stop)
-    report.update(state="loading", stage="Starting", pid=os.getpid(), error=None, early_stop=None,
+    report.update(state="loading", stage="Starting", pid=os.getpid(), error=None, early_stop=None, saving_since=None,
                   started=report.status.get("started") or time.time(), stopped=None)
     try:
         train(cfg, run_dir, report, args.resume, group)

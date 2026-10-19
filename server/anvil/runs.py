@@ -93,14 +93,24 @@ def _running(run_id: str, st: dict) -> bool:
 
 
 def status(run_id: str) -> dict:
-    """The run's status, corrected when its process died without saying so (a crash, or the container restarting)."""
-    path = runs_dir() / run_id / "status.json"
-    current = _read(path, {}) or {}
+    """The run's status, corrected when its process died without saying so (a crash, or the container restarting).
+    While a Stop is under way it has stopping: stop.json (when Stop was pressed, and when the trainer is ended
+    outright if it hasn't stopped by itself), and whether that time has come."""
+    path = runs_dir() / run_id
+    current = _read(path / "status.json", {}) or {}
+    asked = _read(path / "stop.json")
     if current.get("state") in ACTIVE and not _running(run_id, current):
-        current.update(state="failed", stage="Failed", eta_s=None,
-                       error="The training process ended without finishing. The log may say why; "
-                             "Resume continues from the last checkpoint.")
-        _write(path, current)
+        if asked:  # gone after Stop without saying so (ended from a shell, say): stopped all the same
+            current.update(state="stopped", stage="Stopped", eta_s=None, saving_since=None, stopped=time.time(),
+                           ended={"at": time.time(), "step": current.get("step", 0),
+                                  "from": supervisor.newest_checkpoint(path)})
+        else:
+            current.update(state="failed", stage="Failed", eta_s=None,
+                           error="The training process ended without finishing. The log may say why; "
+                                 "Resume continues from the last checkpoint.")
+        _write(path / "status.json", current)
+    if asked and current.get("state") in ACTIVE:
+        return {**current, "stopping": {**asked, "ending": time.time() >= asked.get("end_by", 0)}}
     return current
 
 
@@ -291,9 +301,11 @@ def _start(module: str, key: str, path: Path, cards: list[int], token: str | Non
 
 def _spawn(run_id: str, path: Path, gpus: list[int], token: str | None, resume: bool,
            judge_gpu: int | None = None) -> None:
+    (path / "stop.json").unlink(missing_ok=True)  # the last Stop is done with
     pid = _start("anvil.train", run_id, path, gpus, token, path / "log.txt", ["--resume"] if resume else [])
     current = _read(path / "status.json", {}) or {}
-    current.update(state="starting", stage="Starting", pid=pid, supervisor=pid, error=None, updated=time.time())
+    current.update(state="starting", stage="Starting", pid=pid, supervisor=pid, error=None, ended=None,
+                   updated=time.time())
     _write(path / "status.json", current)
     if judge_gpu is not None:
         (path / "judge").mkdir(exist_ok=True)
@@ -311,7 +323,8 @@ def summary(run_id: str) -> dict:
     return {"id": run_id, "name": cfg.get("name", run_id), "train_as": cfg.get("train_as"), "method": cfg.get("method"),
             "model": (cfg.get("model") or {}).get("id"), "gpu": cfg.get("gpu"),
             "gpus": training_gpus(cfg) if cfg.get("gpu") is not None else [], "created": cfg.get("created"),
-            "state": st.get("state"), "stage": st.get("stage"), "step": st.get("step", 0), "total": st.get("total"),
+            "state": st.get("state"), "stopping": bool(st.get("stopping")), "stage": st.get("stage"),
+            "step": st.get("step", 0), "total": st.get("total"),
             "updated": st.get("updated"), "last_eval": st.get("last_eval"), "error": st.get("error"),
             "best": picking.best(picking.load(path)), "size": size(path)}
 
@@ -486,19 +499,32 @@ def delete(run_id: str) -> int:
     return freed
 
 
-def stop(run_id: str) -> None:
+def stop(run_id: str, now: bool = False) -> None:
+    """Stop after the current step: the trainer saves a checkpoint and stops. The run's supervisor sees to it, from
+    stop.json: a trainer that hasn't stopped supervisor.STOP_GRACE_S later (wedged in a GPU call, say) is ended
+    outright, losing the steps since its newest checkpoint, and now (Stop now, the second press) ends it at once. A save
+    is never cut off.
+
+    The signals are the ones a run started before supervisors read stop.json understands too: Stop is SIGTERM to process
+    0 (the supervisor's own SIGTERM would go on to torchrun, which kills the cards 30 s later, saving or not), and Stop
+    now SIGTERM to the supervisor, which there ends a wedged run of several cards through torchrun."""
     path = run_dir(run_id)
     st = status(run_id)
     if st.get("state") not in ACTIVE:
         raise ValueError("This run isn't running.")
+    asked, t = st.get("stopping") or {}, time.time()
+    _write(path / "stop.json", {"requested": asked.get("requested", t),
+                                "end_by": t if now else asked.get("end_by", t + supervisor.STOP_GRACE_S)})
+    supervising = _supervising(st.get("supervisor"), path)
+    if now and supervising:
+        os.kill(int(st["supervisor"]), signal.SIGTERM)
+        return
     try:
-        os.kill(int(st["pid"]), signal.SIGTERM)  # the trainer saves a checkpoint after the current step, then exits
+        os.kill(int(st["pid"]), signal.SIGKILL if now else signal.SIGTERM)  # now: a run with no supervisor at all
     except ProcessLookupError:
-        if not _supervising(st.get("supervisor"), path):
+        if not supervising:
             raise
         os.kill(int(st["supervisor"]), signal.SIGTERM)  # the trainer just crashed: its supervisor won't start it again
-    st.update(stage="Stopping after this step", updated=time.time())
-    _write(path / "status.json", st)
 
 
 def early_stopped(st: dict) -> bool:

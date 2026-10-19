@@ -1799,6 +1799,28 @@ button:disabled {
   width: min(100%, 160px);
 }
 
+/* Stop under way: what the trainer is doing, when it's ended outright if it doesn't stop, and Stop now. */
+.stop-box {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+  font-size: 14px;
+}
+
+.stop-box:focus {
+  outline: none; /* focus lands here only so a screen reader reads it after Stop */
+}
+
+.stop-box p {
+  margin: 0;
+}
+
 .confirm-actions {
   display: flex;
   flex-wrap: wrap;
