@@ -44,6 +44,7 @@ TEST_ROWS = 5000  # the final test uses at most this many rows (about two minute
 JUDGE_SILENT_S = 90  # a judge that hasn't reported for this long is taken to be gone
 HEAD_LR = 1e-4  # Clef's head, unless the form says otherwise
 HEAD_FIRST = 0.1  # the share of the steps a new Clef head trains alone, before the model joins in
+MAX_SKIPS = 20  # batches skipped in a row (loss or gradients not numbers) before the run fails instead of going on
 STOP = {"requested": False}
 
 
@@ -473,7 +474,21 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     # This step's loss, loss count and tokens on this card; the window's, all cards together, since the last log line.
     mine = [0.0, 0, 0]
     window = [0.0, 0, 0]
-    skipped, micro = 0, 0
+    skipped, micro, in_a_row = 0, 0, 0
+
+    def skip(why: str) -> None:
+        """Every card drops the step's batches so far, so none of them spoils the weights and they stay in step. A rare
+        overflow costs a batch; batch after batch means the run can't go on, and it fails rather than spin forever."""
+        nonlocal skipped, micro, in_a_row
+        skipped, micro, in_a_row = skipped + 1, 0, in_a_row + 1
+        opt.zero_grad(set_to_none=True)
+        say(f"step {step + 1}: skipped batch {bi:,} of epoch {epoch}, {why}", flush=True)  # where to replay it from
+        report.update(skipped=skipped)
+        if in_a_row >= MAX_SKIPS:
+            raise ValueError(f"Training can't go on after step {step:,}: {MAX_SKIPS} batches in a row had a loss or "
+                             "gradients that weren't numbers (NaN or infinity). Resume continues from the newest "
+                             "checkpoint.")
+
     # Speed and ETA come from recent steps only: the first steps include one-time kernel compiling, and validation
     # pauses aren't training speed.
     window_start, window_step, step_rate = time.time(), step, None
@@ -488,12 +503,8 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
             with group.accumulating(learner, sync=last):
                 with autocast():
                     loss = learner(batch)
-                if not group.all(bool(torch.isfinite(loss))):
-                    # A rare half-precision overflow on some card: every card skips the batch, so none of them poisons
-                    # the weights and they stay in step.
-                    skipped += 1
-                    opt.zero_grad(set_to_none=True)
-                    micro = 0
+                if not group.all(bool(torch.isfinite(loss))):  # a rare half-precision overflow on some card
+                    skip("its loss wasn't a number")
                     continue
                 (loss / accum).backward()
             micro += 1
@@ -503,13 +514,21 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
             if not last:
                 continue
             micro = 0
-            for params in (backbone, head):  # each on its own, so a new head's big gradients don't shrink the model's
-                if params:
-                    torch.nn.utils.clip_grad_norm_(params, 1.0)
+            # Each on its own, so a new head's big gradients don't shrink the model's.
+            norms = [torch.nn.utils.clip_grad_norm_(params, 1.0) for params in (backbone, head) if params]
+            if not group.all(all(torch.isfinite(n) for n in norms)):
+                # The loss was fine but the gradients weren't. Clipping would spread a NaN to every gradient, and the
+                # optimizer into every weight: from then on every loss is NaN and every batch is skipped. Seen once
+                # in 14,000 steps on two R9700s; the same steps replayed from the checkpoint before it trained cleanly,
+                # so most likely a fault in the GPU stack rather than the data or the model's numbers.
+                skip("its gradients weren't numbers (" + ", ".join(
+                    f"{name} {float(n):.3g}" for name, n in zip(("model", "head"), norms)) + ")")
+                continue
             opt.step()
             sched.step()
             opt.zero_grad(set_to_none=True)
             step += 1
+            in_a_row = 0
             batch_index = bi + 1
             # The cards agree, every step, on whether to stop (Stop reaches process 0 only) and on the loss and tokens.
             judge_says = early_stop_reason() if group.main and judged_elsewhere else None

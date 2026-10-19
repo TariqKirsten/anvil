@@ -170,6 +170,64 @@ def test_a_trainer_that_crashes_starts_again_from_its_newest_checkpoint(tmp_path
     assert "restarting from the step-" in (run_dir / "log.txt").read_text()
 
 
+def poison(monkeypatch, change) -> None:
+    """The task's loss for each training batch becomes change(call, loss, model); call counts the batches from 1."""
+    from anvil import train
+
+    make, calls = train.make_task, [0]
+
+    def make_task(*args):
+        task = make(*args)
+        loss = task.loss
+
+        def changed(model, batch):
+            calls[0] += 1
+            return change(calls[0], loss(model, batch), model)
+
+        task.loss = changed
+        return task
+
+    monkeypatch.setattr(train, "make_task", make_task)
+
+
+def test_a_step_whose_gradients_arent_numbers_is_skipped_and_the_weights_stay_sound(tmp_path, tiny_model, monkeypatch,
+                                                                                     capsys):
+    import torch
+
+    from anvil import parallel, train
+
+    def nan_gradients(call, loss, model):
+        if call != 3:
+            return loss
+        p = next(q for q in model.parameters() if q.requires_grad)
+        return loss + 0 * torch.sqrt(p - p.detach()).sum()  # adds 0 to the loss, but its gradient is 0/0: NaN
+
+    poison(monkeypatch, nan_gradients)
+    monkeypatch.setenv("ANVIL_DEVICE", "cpu")
+    data = prepared(tmp_path, decision_rows(40), decision_rows(12, seed=1))
+    cfg = run_config(tiny_model, data, maxSteps=6, every=3)
+    run_dir = make_run(tmp_path, cfg)
+    train.train(cfg, run_dir, train.Reporter(run_dir), False, parallel.Group())
+    status = json.loads((run_dir / "status.json").read_text())
+    assert status["state"] == "done" and status["step"] == 6 and status["skipped"] == 1, status
+    assert all(np.isfinite(m["val_loss"]) for m in metrics(run_dir) if m["type"] == "eval")
+    assert "step 3: skipped batch 2 of epoch 0, its gradients weren't numbers (model nan)" in capsys.readouterr().out
+
+
+def test_a_run_that_cant_get_past_bad_batches_fails_instead_of_skipping_forever(tmp_path, tiny_model, monkeypatch):
+    from anvil import parallel, train
+
+    poison(monkeypatch, lambda call, loss, model: loss if call <= 2 else loss * float("nan"))
+    monkeypatch.setenv("ANVIL_DEVICE", "cpu")
+    data = prepared(tmp_path, decision_rows(40), decision_rows(12, seed=1))
+    cfg = run_config(tiny_model, data, maxSteps=6, every=3)
+    run_dir = make_run(tmp_path, cfg)
+    with pytest.raises(ValueError, match=f"{train.MAX_SKIPS} batches in a row"):
+        train.train(cfg, run_dir, train.Reporter(run_dir), False, parallel.Group())
+    status = json.loads((run_dir / "status.json").read_text())
+    assert status["step"] == 2 and status["skipped"] == train.MAX_SKIPS, status
+
+
 def test_a_chat_run_learns_only_the_assistant(tmp_path, tiny_model):
     chats = pd.DataFrame({"messages": [json.dumps([{"role": "user", "content": f"hello {w}"},
                                                    {"role": "assistant", "content": f"thanks {w}"}]) for w in WORDS]})

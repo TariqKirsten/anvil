@@ -395,7 +395,12 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
             from {st.last_crash.from != null ? `the step-${st.last_crash.from.toLocaleString()} checkpoint` : "the start"}.
           </p>
         )}
-        {!!st.skipped && <p className="warn-text">{st.skipped} batches were skipped because their loss wasn't a number.</p>}
+        {!!st.skipped && (
+          <p className="warn-text">
+            {st.skipped === 1 ? "1 batch was" : `${st.skipped.toLocaleString()} batches were`} skipped because their
+            loss or gradients weren't numbers.
+          </p>
+        )}
       </section>
 
       <div className="chart-grid-2">
