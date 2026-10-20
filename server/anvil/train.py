@@ -348,6 +348,14 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     found = checkpoints(run_dir)
     resume_from = group.share(str(found[-1]) if resume and found else None)  # every card resumes from the same one
     resume_from = Path(resume_from) if resume_from else None
+    state = json.loads((resume_from / "state.json").read_text()) if resume_from is not None else None
+    # Every batch is split into shares, one per card the run started on, and a run keeps its split: it can carry on on
+    # fewer cards (on one that faults, say), each taking several shares in turn, and learns just what it would have.
+    world = group.world
+    shares = int(state.get("world", 1)) if state else world
+    if shares % world:
+        raise ValueError(f"This run splits every batch {shares} ways (it started on {shares} GPUs), so it can resume on "
+                         f"{' or '.join(str(n) for n in range(1, shares + 1) if shares % n == 0)} of them.")
     report.update(stage="Loading the model (downloading it first if needed)")
     tok, model = load_model(cfg, device, dtype, resume_from)
 
@@ -358,9 +366,8 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     items, parsed = task.items(train_df)
     val_items, val_parsed = task.items(val_df)
     lengths = task.lengths(items, parsed)
-    world = group.world
     per_card, accum = int(h["batchSize"]), int(h["gradAccum"])
-    per_batch = per_card * world  # one batch is split across the cards: each takes batch size rows of it
+    per_batch = per_card * shares  # one batch is split into its shares: each takes batch size rows of it
     batches_per_epoch = math.ceil(len(items) / per_batch)
     steps_per_epoch = max(1, math.ceil(batches_per_epoch / accum))
     total = int(h.get("maxSteps") or 0) or steps_per_epoch * int(h["epochs"])
@@ -404,22 +411,22 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     warm_until = head_first + warmup(head_first)
     count_after = max(warm_until, int(ck.get("countFrom") or 0))
     step = epoch = batch_index = 0
-    if resume_from is not None:
-        state = json.loads((resume_from / "state.json").read_text())
+    if state is not None:
         saved = torch.load(resume_from / "optimizer.pt", map_location=device, weights_only=False)
         opt.load_state_dict(saved["optimizer"])
         sched.load_state_dict(saved["scheduler"])
         random.setstate(saved["rng"]["python"])
         torch.set_rng_state(saved["rng"]["torch"].cpu())  # map_location moved it to the GPU; it must live on the CPU
         step, epoch, batch_index = state["step"], state["epoch"], state["batch_index"]
-        if state.get("world", 1) != world:
-            raise ValueError(f"This run trained on {state.get('world', 1)} GPUs, so it must resume on as many.")
         report.metric({"type": "resume", "step": step})
     learner = group.wrap(model, task)
+    my_shares = range(group.rank, shares, world)  # this card's shares of every batch, taken in turn
 
     n_trainable = sum(p.numel() for p in backbone + head)
     n_all = sum(p.numel() for p in model.parameters()) + sum(p.numel() for p in head)
     cards = f"{world} cards" if world > 1 else str(device)
+    if shares > world:
+        cards += f", each taking {len(my_shares)} of every batch's {shares} shares in turn"
     say(f"{len(items):,} training items, {len(val_items):,} validation items; {total:,} steps "
         f"({steps_per_epoch:,} per epoch, {per_batch * accum:,} items per step); training {n_trainable / 1e6:.1f}M "
         f"of {n_all / 1e9:.2f}B parameters on {cards}; checks {'on the judge GPU' if judged_elsewhere else 'here'}",
@@ -454,7 +461,7 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
             return
         report.update(stage="Saving a checkpoint", saving_since=time.time())
         save_checkpoint(run_dir, model, tok, opt, sched, {"step": step, "epoch": epoch, "batch_index": batch_index,
-                                                          "world": world, "saved": time.time()}, lora, task)
+                                                          "world": shares, "saved": time.time()}, lora, task)
         if not judged_elsewhere:  # with a judge, the judge keeps the best and deletes the rest
             prune(run_dir, picking.keep(board, keep_best, [step_of(p) for p in checkpoints(run_dir)]))
         report.update(stage=training(), saving_since=None, checkpoints=[p.name for p in checkpoints(run_dir)])
@@ -498,21 +505,27 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     while not finished:
         batches = tasks.length_grouped_batches(lengths, per_batch, random.Random(seed + epoch))
         for bi in range(batch_index, len(batches)):
-            if len(batches[bi]) < world:  # the data's last few rows: too few to give every card one
+            if len(batches[bi]) < shares:  # the data's last few rows: too few to give every share one
                 continue
             last = micro + 1 >= accum or bi + 1 >= len(batches)  # the step's last batch: update the weights after it
-            batch = task.collate([items[i] for i in batches[bi][group.rank::world]], parsed, shuffle=True)
-            with group.accumulating(learner, sync=last):
-                with autocast():
-                    loss = learner(batch)
-                if not group.all(bool(torch.isfinite(loss))):  # a rare half-precision overflow on some card
-                    skip("its loss wasn't a number")
-                    continue
-                (loss / accum).backward()
+            numbers = True
+            for k, share in enumerate(my_shares):
+                batch = task.collate([items[i] for i in batches[bi][share::shares]], parsed, shuffle=True)
+                with group.accumulating(learner, sync=last and k == len(my_shares) - 1):
+                    with autocast():
+                        loss = learner(batch)
+                    numbers = group.all(bool(torch.isfinite(loss)))  # a rare half-precision overflow on some card
+                    if not numbers:
+                        break
+                    # The cards average their gradients: a card with several shares averages its own too.
+                    (loss / (accum * len(my_shares))).backward()
+                mine[0] += float(loss.detach())
+                mine[1] += 1
+                mine[2] += batch["tokens"]
+            if not numbers:
+                skip("its loss wasn't a number")
+                continue
             micro += 1
-            mine[0] += float(loss.detach())
-            mine[1] += 1
-            mine[2] += batch["tokens"]
             if not last:
                 continue
             micro = 0

@@ -144,7 +144,10 @@ every validation check, the final test, the checkpoints and the log.
 - A free GPU you didn't tick becomes the judge (below). Without one, the training cards pause at each checkpoint and
   check it together, each scoring its share of the validation rows. Untick "Use GPU N for checks" to keep that card
   free, for another run say: two experiments side by side, one per card.
-- Resume needs the same cards, because the batches are split by how many there are.
+- A run splits every batch into one share per card it started on, and keeps that split. Resume can carry on with fewer
+  cards, as long as they divide it (a two-card run on one card, say, when the other card faults): each card takes
+  several shares in turn and averages them, so the run learns what it would have on all of them, only slower. The
+  run's `gpus` in its `config.json` say which cards Resume uses.
 - A card that drives your screen can train too, but the desktop may stutter. Close video calls and games on it until
   the run ends: on an R9700 a two-card run once hung the screen card during a video call (it needed a reboot); with
   the call closed, the same run was fine.

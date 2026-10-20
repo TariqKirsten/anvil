@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -725,6 +726,30 @@ def test_two_cards_learn_exactly_what_one_card_learns_from_the_whole_batch(tmp_p
     assert by_step(two, "eval", "rows")[6] == by_step(one, "eval", "rows")[6]
     assert (two / "model" / "adapter" / "adapter_config.json").exists()
     assert "Traceback" not in (two / "log.txt").read_text()
+
+
+def test_a_two_card_run_carries_on_on_one_card_and_learns_what_two_would(tmp_path, tiny_model):
+    data = prepared(tmp_path, decision_rows(60), decision_rows(12, seed=1))
+    two = make_run(tmp_path, run_config(tiny_model, data, batchSize=2, maxSteps=6, every=3, gradCheckpointing=True),
+                   "two")
+    finish(start(two, cards=2), two)
+    one = tmp_path / "one"  # the same run back at its step-3 checkpoint, carrying on on one card (its other one faults)
+    shutil.copytree(two, one)
+    shutil.rmtree(one / "checkpoints" / "step-0000006")
+    status = finish(start(one, resume=True), one)
+    assert status["state"] == "done" and status["step"] == 6 and status["world"] == 1, status
+    assert "each taking 2 of every batch's 2 shares in turn" in (one / "log.txt").read_text()
+    state = json.loads((one / "checkpoints" / "step-0000006" / "state.json").read_text())
+    assert state["world"] == 2  # still split two ways, so it can go back to two cards
+
+    def losses(run_dir, after_resume):
+        lines = metrics(run_dir)
+        start_at = max((i for i, m in enumerate(lines) if m["type"] == "resume"), default=-1) if after_resume else -1
+        return {m["step"]: m["loss"] for m in lines[start_at + 1:] if m["type"] == "train" and m["step"] > 3}
+
+    a, b = losses(two, False), losses(one, True)
+    assert sorted(a) == sorted(b) == [4, 5, 6]
+    assert np.allclose([a[k] for k in (4, 5, 6)], [b[k] for k in (4, 5, 6)], rtol=1e-3, atol=1e-5), (a, b)
 
 
 def test_two_cards_stop_together_and_resume(tmp_path, tiny_model):
