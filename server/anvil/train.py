@@ -371,6 +371,9 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     batches_per_epoch = math.ceil(len(items) / per_batch)
     steps_per_epoch = max(1, math.ceil(batches_per_epoch / accum))
     total = int(h.get("maxSteps") or 0) or steps_per_epoch * int(h["epochs"])
+    # Given a new length on Resume (anvil.runs.resume), a run keeps the start its schedule was laid out with, for the
+    # length it had then: the same warmup, and a new Clef head's steps alone. Only the end of the schedule moves.
+    first_total = int(cfg.get("first_total") or total)
 
     backbone = [p for p in model.parameters() if p.requires_grad]
     head = task.parameters()  # Clef's head; nothing for the other methods
@@ -379,18 +382,24 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
         groups.append({"params": head, "lr": float(h.get("headLearningRate") or HEAD_LR)})
     opt = torch.optim.AdamW(groups, weight_decay=float(h["weightDecay"]))
     # A new head is random at first, so the model would learn from noise: the head trains alone for a while.
-    head_first = int(total * HEAD_FIRST) if fresh_head(cfg) else 0
+    head_first = int(first_total * HEAD_FIRST) if fresh_head(cfg) else 0
 
     def warmup(start: int) -> int:
         """The warmup's steps, in a schedule over the steps from start to the end."""
-        return int(max(1, total - start) * float(h["warmupPercent"]) / 100)
+        return int(max(1, first_total - start) * float(h["warmupPercent"]) / 100)
 
-    def schedule(start: int):
+    # Resumed with more steps to go, the schedule can be higher than where the run left off (a finished run's has
+    # decayed to nothing): it climbs back from there over a warmup's steps instead of jumping. Per parameter group:
+    # (the step it climbs from, the factor there, steps to climb).
+    climbs: dict[int, tuple[int, float, int]] = {}
+    plans: list = []  # per parameter group: its planned schedule, and its warmup's steps
+
+    def schedule(start: int, index: int):
         """Warmup, then the chosen schedule, over the steps from start to the end (nothing before start)."""
         span = max(1, total - start)
         warm = warmup(start)
 
-        def factor(step: int) -> float:
+        def planned(step: int) -> float:
             if step < start:
                 return 0.0
             step -= start
@@ -403,9 +412,16 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
                 return 1.0 - progress
             return 1.0
 
+        def factor(step: int) -> float:
+            begin, low, steps = climbs.get(index, (0, 0.0, 0))
+            if begin <= step < begin + steps:
+                return low + (planned(step) - low) * (step - begin) / steps
+            return planned(step)
+
+        plans.append((planned, warm))
         return factor
 
-    sched = torch.optim.lr_scheduler.LambdaLR(opt, [schedule(head_first)] + ([schedule(0)] if head else []))
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, [schedule(head_first, 0)] + ([schedule(0, 1)] if head else []))
     # Until the model has warmed up (after a new head's steps alone, if any), a pause in its gains says nothing yet:
     # early stopping counts the checks after that, or after where Keep training picked up if that's later.
     warm_until = head_first + warmup(head_first)
@@ -418,7 +434,13 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
         random.setstate(saved["rng"]["python"])
         torch.set_rng_state(saved["rng"]["torch"].cpu())  # map_location moved it to the GPU; it must live on the CPU
         step, epoch, batch_index = state["step"], state["epoch"], state["batch_index"]
-        report.metric({"type": "resume", "step": step})
+        for index, ((planned, warm), param_group, base) in enumerate(zip(plans, opt.param_groups, sched.base_lrs)):
+            low = param_group["lr"] / base  # where the run left off: its optimizer keeps the last learning rate
+            if warm and planned(step) > low * 1.001:
+                climbs[index] = (step, low, warm)
+                say(f"the learning rate climbs from {param_group['lr']:.3g} back to the schedule's "
+                    f"{planned(step) * base:.3g} over {warm:,} steps", flush=True)
+        report.metric({"type": "resume", "step": step, "total": total})
     learner = group.wrap(model, task)
     my_shares = range(group.rank, shares, world)  # this card's shares of every batch, taken in turn
 

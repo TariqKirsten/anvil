@@ -248,10 +248,50 @@ export interface RunDetail {
   leaderboard: Leaderboard;
   judge: JudgeStatus | null;
   size: number; // bytes on disk: checkpoints, model, metrics and logs
-  // What can be exported as GGUF (the finished model, kept checkpoints), and the exports so far.
-  versions: { version: string; step: number | null; score: number | null; metric: string | null }[];
+  // What can be exported as GGUF or uploaded (the finished model, kept checkpoints), and the exports so far. sizes:
+  // the weights' bytes, whole (merged) and LoRA's adapter alone, where known.
+  versions: {
+    version: string;
+    step: number | null;
+    score: number | null;
+    metric: string | null;
+    sizes?: { merged: number | null; adapter: number | null };
+  }[];
   exports: ExportStatus[];
   export_params: number | null; // weights in the finished model (and Clef's head), for size estimates
+  uploads?: UploadStatus[]; // uploads to Hugging Face, newest first
+}
+
+// server/anvil/upload.py: one upload of a version, to one repo or two (the weights', and the GGUF files').
+export interface UploadStatus {
+  id: string;
+  version: string;
+  weights: "merged" | "adapter" | null;
+  gguf: string[];
+  repo?: string | null;
+  gguf_repo?: string | null;
+  private: boolean;
+  state: "starting" | "running" | "done" | "failed" | "cancelled";
+  stage: string;
+  bytes_total?: number;
+  bytes_done?: number;
+  repos?: {
+    id: string;
+    url: string;
+    state: "waiting" | "running" | "done" | "failed";
+    created?: boolean; // made by this upload
+    made?: "public" | "private" | null; // an existing repo whose visibility this upload changed
+    card?: "written" | "kept"; // kept: someone had edited it on Hugging Face
+  }[];
+  error?: string | null;
+}
+
+// Whose the Hugging Face token is, and the namespaces it can upload to (none for a read token).
+export interface HubMe {
+  connected: boolean;
+  name: string | null;
+  namespaces: string[];
+  write: boolean;
 }
 
 export interface ExportStatus {

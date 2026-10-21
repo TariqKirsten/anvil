@@ -592,6 +592,71 @@ def test_a_run_that_stopped_early_trains_on_with_more_patience_or_to_the_end(tmp
         runs.resume("early", None, patience=2)
 
 
+def test_a_finished_run_trains_on_with_more_epochs_and_its_learning_rate_climbs_back(tmp_path, tiny_model,
+                                                                                    monkeypatch):
+    monkeypatch.setattr(config, "settings", config.Settings(password="x", data=tmp_path / "data", hf_token=None))
+    monkeypatch.setattr(runs.gpus, "list_gpus", lambda: {"gpus": [{"index": 0, "display": False, "busy": False}]})
+    procs = []
+    monkeypatch.setattr(runs, "_spawn", lambda run_id, path, gpus, token, resume, judge_gpu=None:
+                        procs.append(start(path, resume=resume)))
+    data = prepared(tmp_path, decision_rows(40), decision_rows(12, seed=1))  # 54 questions: 14 steps of 4
+    cfg = run_config(tiny_model, data, every=7, warmupPercent=30)  # one epoch; warming up for 4 steps
+    cfg["checkpoints"].update(patience=0)
+    (tmp_path / "data" / "runs").mkdir(parents=True)
+    run_dir = make_run(tmp_path / "data" / "runs", cfg, "more")
+    first = finish(start(run_dir), run_dir)
+    assert first["state"] == "done" and first["step"] == first["total"] == 14 and first["warm_until"] == 4, first
+
+    with pytest.raises(ValueError, match="has finished. Give it more epochs"):
+        runs.resume("more", None, patience=0)
+    with pytest.raises(ValueError, match="trained 1 epoch already, to step 14: give it at least 2"):
+        runs.resume("more", None, patience=0, epochs=1)
+    with pytest.raises(ValueError, match="how many more checks"):
+        runs.resume("more", None, epochs=2)
+    runs.resume("more", None, patience=0, epochs=2)
+    saved = json.loads((run_dir / "config.json").read_text())
+    assert saved["hyper"]["epochs"] == 2 and saved["first_total"] == 14
+    assert runs.status("more")["total"] == 28  # the run page shows the new length before the trainer has loaded
+    status = finish(procs[-1], run_dir)
+    assert status["state"] == "done" and status["step"] == status["total"] == 28, status
+    assert status["warm_until"] == 4  # the warmup stays as it was: only the end of the schedule moved
+    assert {"type": "resume", "step": 14, "total": 28} in metrics(run_dir)
+    lr = {m["step"]: m["lr"] for m in metrics(run_dir) if m["type"] == "train"}
+    assert lr[14] < 1e-6 * lr[18]  # one epoch's cosine had decayed to nothing...
+    assert lr[15] < lr[16] < lr[17] < lr[18]  # ...so it climbs back over 4 steps, the warmup's length...
+    assert all(lr[s] > lr[s + 1] for s in range(18, 27))  # ...to the cosine over two epochs, and down it again
+    assert "the learning rate climbs from" in (run_dir / "log.txt").read_text()
+
+
+def test_resume_with_new_epochs_moves_only_the_end_of_the_run(run_settings):
+    run_id = runs.create({**FORM, "hyper": {**FORM["hyper"], "maxSteps": 600}}, {"train": {}}, None)
+    path = config.settings.data / "runs" / run_id
+    (path / "prepared").mkdir()
+    (path / "prepared" / "train.parquet").write_text("")
+    cfg = json.loads((path / "config.json").read_text())
+    cfg["data"]["prepared"] = str(path / "prepared")
+    (path / "config.json").write_text(json.dumps(cfg))
+    (path / "status.json").write_text(json.dumps({"state": "stopped", "step": 520, "total": 600,
+                                                  "steps_per_epoch": 400}))
+    (path / "checkpoints" / "step-0000500").mkdir(parents=True)
+    (path / "checkpoints" / "step-0000500" / "state.json").write_text("{}")
+    for bad in (0, 101, True, 2.5):
+        with pytest.raises(ValueError, match="whole number of epochs from 1 to 100"):
+            runs.resume(run_id, None, epochs=bad)
+    with pytest.raises(ValueError, match=r"trained 1\.25 epochs already, to step 500: give it at least 2"):
+        runs.resume(run_id, None, epochs=1)
+    runs.resume(run_id, None, epochs=3)
+    saved = json.loads((path / "config.json").read_text())
+    assert saved["hyper"]["epochs"] == 3 and saved["hyper"]["maxSteps"] == 0  # the epochs lift Max steps
+    assert saved["first_total"] == 600 and saved["checkpoints"].get("countFrom") is None
+    assert json.loads((path / "status.json").read_text())["total"] == 1200
+    assert run_settings[-1][0] == run_id
+    (path / "status.json").write_text(json.dumps({"state": "stopped", "step": 520, "total": 1200,
+                                                  "steps_per_epoch": 400}))
+    runs.resume(run_id, None, epochs=4)
+    assert json.loads((path / "config.json").read_text())["first_total"] == 600  # still the length it had first
+
+
 def test_a_judge_process_checks_every_checkpoint(tmp_path, tiny_model):
     data = prepared(tmp_path, decision_rows(40), decision_rows(12, seed=1))
     cfg = run_config(tiny_model, data, maxSteps=6, every=2)

@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, datasets, export, folders, gpus, models_check, picking, supervisor
+from . import config, datasets, export, folders, gpus, models_check, picking, supervisor, upload
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 ACTIVE = {"starting", "loading", "running", "saving"}
@@ -368,7 +368,8 @@ def detail(run_id: str, log_lines: int = 200) -> dict:
     return {"config": _read(path / "config.json", {}), "status": status(run_id), "metrics": metrics, "log": log,
             "checkpoints": ckpts, "model": str(path / "model") if (path / "model").exists() else None,
             "leaderboard": picking.load(path), "judge": judge_status(run_id), "size": size(path),
-            "versions": versions(run_id), "exports": exports(run_id), "export_params": export_params(path)}
+            "versions": versions(run_id), "exports": exports(run_id), "export_params": export_params(path),
+            "uploads": uploads(run_id)}
 
 
 def _judge_running(run_id: str) -> bool:
@@ -396,18 +397,28 @@ def versions(run_id: str) -> list[dict]:
     path = run_dir(run_id)
     scores = {e["step"]: e for e in picking.load(path)["entries"]}
     found = []
-    if (path / "model" / "merged" / "config.json").exists():
+    # The weights' size on disk, for uploading: the whole model, and LoRA's adapter alone. A LoRA checkpoint's whole
+    # model is merged on the way up, as big as the finished one.
+    merged = size(path / "model" / "merged") if (path / "model" / "merged" / "config.json").exists() else None
+    if merged is not None:
         about = _read(path / "model" / "merged" / "anvil.json", {}) or {}
         entry = scores.get(about.get("picked_step"))
         found.append({"version": "final", "step": about.get("picked_step"), "score": entry and entry["score"],
-                      "metric": entry and entry["metric"]})
+                      "metric": entry and entry["metric"],
+                      "sizes": {"merged": merged, "adapter": _size_of(path / "model" / "adapter")}})
     if (path / "checkpoints").exists():
         for checkpoint in sorted((path / "checkpoints").glob("step-*")):
             if (checkpoint / "state.json").exists() and export.VERSION.match(checkpoint.name):
                 entry = scores.get(int(checkpoint.name[5:]))
+                adapter = _size_of(checkpoint / "adapter")
                 found.append({"version": checkpoint.name, "step": int(checkpoint.name[5:]),
-                              "score": entry and entry["score"], "metric": entry and entry["metric"]})
+                              "score": entry and entry["score"], "metric": entry and entry["metric"],
+                              "sizes": {"merged": _size_of(checkpoint / "model") or merged, "adapter": adapter}})
     return found
+
+
+def _size_of(folder: Path) -> int | None:
+    return size(folder) if folder.is_dir() else None
 
 
 def export_params(path: Path) -> int | None:
@@ -453,6 +464,8 @@ def start_export(run_id: str, version: str, quants: list[str]) -> None:
         raise ValueError("Pick at least one type to export.")
     if _exporting(run_id):
         raise ValueError("An export of this run is still going. Wait for it to finish.")
+    if _uploading(run_id):
+        raise ValueError("This run is being uploaded to Hugging Face. Export once the upload is done.")
     folder = path / "exports" / version
     folder.mkdir(parents=True, exist_ok=True)
     _write(folder / "request.json", {"quants": chosen, "requested": time.time()})
@@ -481,6 +494,128 @@ def export_file(run_id: str, version: str, name: str) -> Path:
     return file
 
 
+# ---------------------------------------------------------------- uploading to Hugging Face (anvil.upload)
+
+def _uploader(pid: int | None, path: Path) -> bool:
+    """Whether pid is an upload of the run in path. Its number may have gone to another process since."""
+    if not pid:
+        return False
+    try:
+        args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    return b"anvil.upload" in args and str(path).encode() in args
+
+
+def uploads(run_id: str) -> list[dict]:
+    """Every upload of this run, newest first: what it sent where, and how far it got."""
+    path = runs_dir() / run_id
+    found = []
+    if (path / "uploads").exists():
+        for folder in sorted((path / "uploads").iterdir(), reverse=True):
+            current = _read(folder / "status.json")
+            if not current:
+                continue
+            proc = _processes.get(f"{run_id}:upload:{folder.name}")
+            going = proc.poll() is None if proc is not None else _uploader(current.get("pid"), path)
+            if current.get("state") in ("starting", "running") and not going:
+                if (folder / "cancel.json").exists():
+                    current.update(state="cancelled", stage="Cancelled")
+                else:
+                    current.update(state="failed", stage="Failed", error="The upload stopped without finishing. The "
+                                                                           "log in its folder may say why; try again.")
+                _write(folder / "status.json", current)
+            request = _read(folder / "request.json", {}) or {}
+            found.append({"id": folder.name, **{k: v for k, v in request.items() if k in (
+                "version", "weights", "gguf", "repo", "gguf_repo", "private")},
+                **{k: v for k, v in current.items() if k != "pid"}})
+    return found
+
+
+def _uploading(run_id: str) -> bool:
+    return any(u.get("state") in ("starting", "running") for u in uploads(run_id))
+
+
+def start_upload(run_id: str, want: dict, token: str | None) -> str:
+    """Start uploading a version to Hugging Face: its weights (merged, or LoRA's adapter alone) to want["repo"], and the
+    GGUF files named in want["gguf"] from its export to want["gguf_repo"], private or public. Returns the upload's id."""
+    path = run_dir(run_id)
+    if not token:
+        raise ValueError("Connect your Hugging Face account in Settings first, with a write token.")
+    if status(run_id).get("state") in ACTIVE:
+        raise ValueError("This run is still going: upload it once it has finished or been stopped.")
+    version = want.get("version")
+    if version not in {v["version"] for v in versions(run_id)}:
+        raise ValueError("That version of the run doesn't exist (any more).")
+    weights = want.get("weights") or None
+    if weights not in (None, "merged", "adapter"):
+        raise ValueError("Upload the whole model (merged) or the adapter alone.")
+    cfg = _read(path / "config.json")
+    if weights == "adapter" and cfg["training_type"] != "lora":
+        raise ValueError("Only a LoRA run has an adapter to upload on its own.")
+    gguf = [str(name) for name in want.get("gguf") or []]
+    made = next((e for e in exports(run_id) if e["version"] == version and e.get("state") == "done"), {})
+    if not set(gguf) <= {f["name"] for f in made.get("files") or []}:
+        raise ValueError("Those GGUF files aren't in this version's export (any more). Export it again.")
+    if not weights and not gguf:
+        raise ValueError("Pick the weights, a GGUF file, or both.")
+    repos = {}
+    for key, used in (("repo", weights), ("gguf_repo", gguf)):
+        if used:
+            repo = str(want.get(key) or "").strip()
+            if not upload.REPO_ID.match(repo) or repo.startswith("."):
+                raise ValueError(f"A repository looks like your-name/model-name{f', not {repo}' if repo else ''}.")
+            repos[key] = repo
+    if _uploading(run_id):
+        raise ValueError("An upload of this run is still going. Wait for it to finish, or cancel it.")
+    if _exporting(run_id):
+        raise ValueError("This run is being exported. Upload once the export is done.")
+    base = time.strftime("%Y%m%d-%H%M%S")
+    upload_id, n = base, 1
+    while (path / "uploads" / upload_id).exists():
+        upload_id, n = f"{base}-{n}", n + 1
+    folder = path / "uploads" / upload_id
+    folder.mkdir(parents=True)
+    _write(folder / "request.json", {"version": version, "weights": weights, "gguf": gguf, **repos,
+                                     "private": want.get("private") is not False, "requested": time.time()})
+    _write(folder / "status.json", {"state": "starting", "stage": "Starting", "updated": time.time()})
+    env = {k: v for k, v in os.environ.items() if k not in ("ROCR_VISIBLE_DEVICES",)}
+    env.update(HIP_VISIBLE_DEVICES="", CUDA_VISIBLE_DEVICES="", PYTHONPATH=str(SERVER_DIR), PYTHONUNBUFFERED="1",
+               HF_TOKEN=token)
+    log = (folder / "log.txt").open("ab")
+    log.write(f"\n===== anvil.upload {version} to {', '.join(repos.values())} "
+              f"{time.strftime('%Y-%m-%d %H:%M:%S')} =====\n".encode())
+    log.flush()
+    _processes[f"{run_id}:upload:{upload_id}"] = subprocess.Popen(
+        [sys.executable, "-m", "anvil.upload", str(path), upload_id], cwd=SERVER_DIR, env=env, stdout=log,
+        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+    log.close()
+    return upload_id
+
+
+def cancel_upload(run_id: str, upload_id: str) -> None:
+    """End an upload outright. Nothing reaches its repo until the upload's commit, so the repo stays as it was."""
+    path = run_dir(run_id)
+    folder = path / "uploads" / upload_id
+    if not upload.UPLOAD_ID.match(upload_id) or not (folder / "status.json").exists():
+        raise FileNotFoundError("No such upload.")
+    if (_read(folder / "status.json", {}) or {}).get("state") not in ("starting", "running"):
+        raise ValueError("This upload isn't going any more.")
+    _write(folder / "cancel.json", {"requested": time.time()})
+    proc = _processes.get(f"{run_id}:upload:{upload_id}")
+    pid = proc.pid if proc is not None and proc.poll() is None else (_read(folder / "status.json", {}) or {}).get("pid")
+    if (proc is not None and proc.poll() is None) or _uploader(pid, path):
+        try:
+            os.killpg(pid, signal.SIGKILL)  # its own session, so this ends just the upload (and any merge it started)
+        except ProcessLookupError:
+            pass
+        if proc is not None:
+            proc.wait(timeout=30)
+    current = _read(folder / "status.json", {}) or {}
+    current.update(state="cancelled", stage="Cancelled", error=None, updated=time.time())
+    _write(folder / "status.json", current)
+
+
 def delete(run_id: str) -> int:
     """Delete a run with everything it saved: checkpoints, the finished model, metrics and logs. Returns the bytes freed.
     A run that's still training, or whose judge is still checking, has to finish or be stopped first."""
@@ -491,11 +626,15 @@ def delete(run_id: str) -> int:
         raise ValueError("This run's judge is still checking its last checkpoints. Try again when it's done.")
     if _exporting(run_id):
         raise ValueError("This run is being exported. Try again when the export is done.")
+    if _uploading(run_id):
+        raise ValueError("This run is being uploaded to Hugging Face. Try again when the upload is done.")
     freed = size(path)
     shutil.rmtree(path)
     _processes.pop(run_id, None)
     _processes.pop(f"{run_id}:judge", None)
     _processes.pop(f"{run_id}:export", None)
+    for key in [k for k in _processes if k.startswith(f"{run_id}:upload:")]:
+        _processes.pop(key)
     return freed
 
 
@@ -532,24 +671,45 @@ def early_stopped(st: dict) -> bool:
     return st.get("state") == "done" and bool(st.get("early_stop")) and st.get("step", 0) < (st.get("total") or 0)
 
 
-def resume(run_id: str, token: str | None, patience: int | None = None) -> None:
+def _epochs(n: float) -> str:
+    """1 -> "1 epoch", 1.5 -> "1.5 epochs"."""
+    text = f"{n:.2f}".rstrip("0").rstrip(".")
+    return f"{text} epoch{'' if text == '1' else 's'}"
+
+
+def resume(run_id: str, token: str | None, patience: int | None = None, epochs: int | None = None) -> None:
     """Carry on from the newest checkpoint. patience, when given, replaces Stop after no gain for, counted from here:
-    how many checks in a row without a gain to wait (0 trains to the last step). A run that stopped early needs it, or
-    it would stop again at once."""
+    how many checks in a row without a gain to wait (0 trains to the last step). A finished run needs it, or one that
+    stopped early would stop again at once.
+
+    epochs, when given, is how many passes over the training data the run makes in all, and lifts a Max steps limit.
+    With more, a run that has finished trains on too. The learning rate's schedule then runs to the new last step: the
+    trainer keeps its warmup (and a new Clef head's steps alone) as they were, for the length the run had first."""
     path = run_dir(run_id)
     st = status(run_id)
     if st.get("state") in ACTIVE:
         raise ValueError("This run is still running.")
-    again = early_stopped(st)
-    if st.get("state") == "done" and not again:
-        raise ValueError("This run has finished.")
+    if epochs is not None and (isinstance(epochs, bool) or not isinstance(epochs, int) or not 1 <= epochs <= 100):
+        raise ValueError("Use a whole number of epochs from 1 to 100.")
+    cfg = _read(path / "config.json")
+    newest = supervisor.newest_checkpoint(path)
+    per_epoch = st.get("steps_per_epoch")  # known once the trainer has read the data
+    total = per_epoch * epochs if epochs is not None and per_epoch else None
+    if total is not None and newest is not None and total <= newest:
+        raise ValueError(f"It has trained {_epochs(newest / per_epoch)} already, to step {newest:,}: give it at least "
+                         f"{newest // per_epoch + 1}.")
+    finished = st.get("state") == "done"
+    again = early_stopped(st) or (finished and total is not None)
+    if finished and not again:
+        raise ValueError("This run has finished. Give it more epochs to train on.")
     if again and patience is None:
         raise ValueError("Say how many more checks without a gain to wait, or 0 to train to the last step.")
     if patience is not None and not 0 <= patience <= 1000:
         raise ValueError("Use 0 (never stop early) or a whole number up to 1000.")
     if again and _exporting(run_id):
         raise ValueError("This run is being exported. Try again when the export is done.")
-    cfg = _read(path / "config.json")
+    if again and _uploading(run_id):
+        raise ValueError("This run is being uploaded to Hugging Face. Try again when the upload is done.")
     if not Path(cfg["data"]["prepared"], "train.parquet").exists():
         raise ValueError("The prepared data for this run is gone. Prepare it again and start a new run.")
     busy = busy_gpus()
@@ -558,11 +718,18 @@ def resume(run_id: str, token: str | None, patience: int | None = None) -> None:
     if taken:
         raise ValueError(f"{'; '.join(taken)}. Resume when {'it is' if len(taken) == 1 else 'they are'} free.")
     if patience is not None:  # the trainer counts the checks after countFrom, where it picks up again
-        cfg["checkpoints"].update(patience=patience, countFrom=supervisor.newest_checkpoint(path) or 0)
+        cfg["checkpoints"].update(patience=patience, countFrom=newest or 0)
+    if epochs is not None:
+        if newest and st.get("total"):  # it has trained: its schedule's start stays laid out for its first length
+            cfg.setdefault("first_total", st["total"])
+        cfg["hyper"].update(epochs=epochs, maxSteps=0)
+    if patience is not None or epochs is not None:
         _write(path / "config.json", cfg)
+    changes = {"total": total} if total is not None else {}  # the run page shows the new length at once
     if again:  # no longer finished: the judge mustn't take the old finish as the end of training
-        _write(path / "status.json", {**st, "early_stop": None, "training_finished": False, "finished": None,
-                                      "final_test": None})
+        changes.update(early_stop=None, training_finished=False, finished=None, final_test=None)
+    if changes:
+        _write(path / "status.json", {**st, **changes})
     judge_gpu = cfg.get("judge_gpu")
     if _judge_running(run_id):  # still checking from before the stop: it carries on with the resumed trainer
         _spawn(run_id, path, cards, token, resume=True)

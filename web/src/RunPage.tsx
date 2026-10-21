@@ -4,14 +4,16 @@
 import { IconArrowLeft, IconPlayerPlay, IconPlayerStop, IconTrash } from "@tabler/icons-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import { Chart } from "./Chart";
+import { ChartSection } from "./Chart";
 import { ExportSection } from "./ExportSection";
 import { bytes } from "./format";
 import { QuestionScores, questionsOf, type ScoredCheck } from "./QuestionScores";
+import { ResumeBox } from "./ResumeBox";
 import { METRIC_LABEL, STATE_LABEL, stateTone, when } from "./Runs";
 import { Topbar } from "./Topbar";
+import { UploadSection } from "./UploadSection";
 import type { RunDetail, RunMetric } from "./types";
-import { Badge, Field, NumberInput, Section, Segmented } from "./ui";
+import { Badge, Section } from "./ui";
 
 const ACTIVE = new Set(["starting", "loading", "running", "saving"]);
 
@@ -109,14 +111,11 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  // Training on after an early stop: a new Stop after no gain for, counted from here, or on to the last step.
-  const [continuing, setContinuing] = useState(false);
-  const [toEnd, setToEnd] = useState(false);
-  const [more, setMore] = useState(3);
-  const [continueError, setContinueError] = useState<string | null>(null);
+  // Resume (a stopped or failed run) and Keep training (a finished one) open their box first.
+  const [opening, setOpening] = useState<"resume" | "continue" | null>(null);
+  const resumeRef = useRef<HTMLButtonElement>(null);
   const keepRef = useRef<HTMLButtonElement>(null);
-  const boxRef = useRef<HTMLFormElement>(null);
-  const wasContinuing = useRef(false);
+  const wasOpening = useRef<"resume" | "continue" | null>(null);
   const logRef = useRef<HTMLPreElement>(null);
   const stopRef = useRef<HTMLDivElement>(null);
   const stopPressed = useRef(false);
@@ -124,7 +123,8 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   // Stop pressed, and the trainer hasn't stopped yet.
   const stopping = run && active ? run.status.stopping ?? null : null;
   const exporting = !!run?.exports.some((e) => e.state === "starting" || e.state === "running");
-  const polling = active || exporting;
+  const uploading = !!run?.uploads?.some((u) => u.state === "starting" || u.state === "running");
+  const polling = active || exporting || uploading;
 
   useEffect(() => {
     let alive = true;
@@ -157,19 +157,18 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
     stopPressed.current = false;
   }, [isStopping]);
 
-  // The Keep training button gives way to its box: focus goes into the box, and back to the button on Cancel.
+  // The Resume and Keep training buttons give way to their box (which takes the focus), and get it back on Cancel.
   useEffect(() => {
-    if (continuing) boxRef.current?.querySelector("button")?.focus();
-    else if (wasContinuing.current) keepRef.current?.focus();
-    wasContinuing.current = continuing;
-  }, [continuing]);
+    if (!opening && wasOpening.current) (wasOpening.current === "resume" ? resumeRef : keepRef).current?.focus();
+    wasOpening.current = opening;
+  }, [opening]);
 
   // now: Stop now, which ends the trainer at once instead of after this step.
-  async function act(what: "stop" | "resume", now = false) {
+  async function stop(now = false) {
     setActing(true);
     try {
-      await api(`/api/runs/${id}/${what}`, now ? { json: { now: true } } : { method: "POST" });
-      stopPressed.current = what === "stop" && !now;
+      await api(`/api/runs/${id}/stop`, now ? { json: { now: true } } : { method: "POST" });
+      stopPressed.current = !now;
       setRun(await api<RunDetail>(`/api/runs/${id}`));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -178,19 +177,11 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
     }
   }
 
-  // patience: checks in a row without a gain to wait from here; 0 trains to the last step.
-  async function keepTraining(patience: number) {
-    setActing(true);
-    setContinueError(null);
-    try {
-      await api(`/api/runs/${id}/resume`, { json: { patience } });
-      setRun(await api<RunDetail>(`/api/runs/${id}`));
-      setContinuing(false); // with the new status, so the Keep training button doesn't flash back in between
-    } catch (e) {
-      setContinueError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setActing(false);
-    }
+  // Resumed: the new status comes first, so the Resume or Keep training button doesn't flash back in between.
+  async function started() {
+    setRun(await api<RunDetail>(`/api/runs/${id}`));
+    wasOpening.current = null; // the button is gone: nothing to give the focus back to
+    setOpening(null);
   }
 
   // Deleting removes the run's folder for good: checkpoints, the finished model, metrics and the log.
@@ -240,17 +231,10 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   // A failed run never gets a finish time, so its last update stands in for one.
   const end = st.finished ?? st.stopped ?? (ACTIVE.has(st.state) ? Date.now() / 1000 : st.updated);
   const elapsed = st.started && end ? end - st.started : null;
-  // Stopped early before its last step: it can train on from the newest checkpoint (not while an export reads it).
-  const canContinue = st.state === "done" && !!st.early_stop && !!st.total && st.step < st.total && newest != null
-    && !exporting;
-  const moreError = !toEnd && !(Number.isInteger(more) && more >= 1 && more <= 1000) ? "Use a whole number from 1 to 1000, or pick Train to the end." : undefined;
-  // Checks fall on every `every` steps, and early stopping counts the ones after where training picks up (or after
-  // the model has warmed up, if that's later), so with no gain the stop comes `more` checks after that.
-  const every = cfg.checkpoints.every;
-  const stopsAt = newest != null ? (Math.floor(Math.max(newest, st.warm_until ?? 0) / every) + more) * every : null;
-  const moreHint = stopsAt != null && stopsAt < (st.total ?? 0)
-    ? `A check every ${every.toLocaleString()} steps: with no gain, it stops around step ${stopsAt.toLocaleString()}. A gain starts the count again.`
-    : `A check every ${every.toLocaleString()} steps: that many reaches the last step, so it trains to the end either way.`;
+  // A finished run can train on from the newest checkpoint (not while an export or an upload reads it): one that
+  // stopped early towards its last step, and one that got there with more epochs.
+  const canContinue = st.state === "done" && newest != null && !exporting && !uploading
+    && ((!!st.early_stop && !!st.total && st.step < st.total) || !!st.steps_per_epoch);
   // Early stopping counts the checks after the model has warmed up, or after where Keep training picked up.
   const warmUntil = st.warm_until ?? 0;
   const countFrom = cfg.checkpoints.countFrom ?? 0;
@@ -314,30 +298,33 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           <div className="run-actions">
             <Badge tone={stateTone(st.state, !!stopping)}>{stopping ? "Stopping" : STATE_LABEL[st.state] ?? st.state}</Badge>
             {ACTIVE.has(st.state) && !stopping && (
-              <button type="button" disabled={acting} onClick={() => act("stop")}>
+              <button type="button" disabled={acting} onClick={() => stop()}>
                 <IconPlayerStop size={16} aria-hidden /> {acting ? "Stopping…" : "Stop"}
               </button>
             )}
-            {(st.state === "stopped" || st.state === "failed") && (
-              <button type="button" className="primary" onClick={() => act("resume")}>
-                <IconPlayerPlay size={16} aria-hidden /> {acting ? "Resuming…" : "Resume"}
+            {(st.state === "stopped" || st.state === "failed") && opening !== "resume" && (
+              <button type="button" className="primary" ref={resumeRef}
+                onClick={() => {
+                  setOpening("resume");
+                  setConfirming(false);
+                }}>
+                <IconPlayerPlay size={16} aria-hidden /> Resume
               </button>
             )}
-            {canContinue && !continuing && (
+            {canContinue && opening !== "continue" && (
               <button type="button" className="primary" ref={keepRef}
                 onClick={() => {
-                  setContinuing(true);
-                  setContinueError(null);
+                  setOpening("continue");
                   setConfirming(false);
                 }}>
                 <IconPlayerPlay size={16} aria-hidden /> Keep training
               </button>
             )}
-            {!ACTIVE.has(st.state) && !exporting && !confirming && (
+            {!ACTIVE.has(st.state) && !exporting && !uploading && !confirming && (
               <button type="button" className="danger"
                 onClick={() => {
                   setConfirming(true);
-                  setContinuing(false);
+                  setOpening(null);
                 }}>
                 <IconTrash size={16} aria-hidden /> Delete
               </button>
@@ -359,32 +346,9 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           </div>
         )}
         {deleteError && <p className="error-box">{deleteError}</p>}
-        {canContinue && continuing && (
-          <form ref={boxRef} className="resume-box" aria-label="Keep training"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!moreError) keepTraining(toEnd ? 0 : more);
-            }}>
-            <p>
-              Train on from the newest checkpoint (step {newest!.toLocaleString()}) towards step{" "}
-              {st.total!.toLocaleString()}. The finished model is picked again at the end, from every check so far.
-            </p>
-            <Segmented label="When to stop" value={toEnd ? "end" : "early"} onChange={(v) => setToEnd(v === "end")}
-              options={[{ value: "early", label: "Stop early" }, { value: "end", label: "To the end" }]} />
-            {toEnd && <p className="hint">No early stopping: it trains all the way to step {st.total!.toLocaleString()}.</p>}
-            {!toEnd && (
-              <Field id="more-checks" label="More checks without a gain" error={moreError} hint={moreHint}>
-                <NumberInput id="more-checks" value={more} min={1} step={1} invalid={!!moreError} onChange={setMore} />
-              </Field>
-            )}
-            {continueError && <p className="field-error" role="alert">{continueError}</p>}
-            <div className="confirm-actions">
-              <button type="submit" className="primary" disabled={acting || !!moreError}>
-                <IconPlayerPlay size={16} aria-hidden /> {acting ? "Starting…" : "Keep training"}
-              </button>
-              <button type="button" disabled={acting} onClick={() => setContinuing(false)}>Cancel</button>
-            </div>
-          </form>
+        {opening && (opening === "resume" ? st.state === "stopped" || st.state === "failed" : canContinue) && (
+          <ResumeBox key={opening} run={run} id={id} mode={opening} newest={newest} onStarted={started}
+            onCancel={() => setOpening(null)} />
         )}
 
         {stopping && (
@@ -400,7 +364,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
                   ended outright then.
                 </p>
                 <p>Stop now ends it at once instead. {plan.cost}</p>
-                <button type="button" className="danger" disabled={acting} onClick={() => act("stop", true)}>
+                <button type="button" className="danger" disabled={acting} onClick={() => stop(true)}>
                   <IconPlayerStop size={16} aria-hidden /> {acting ? "Ending…" : "Stop now"}
                 </button>
               </>
@@ -476,22 +440,19 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
       </section>
 
       <div className="chart-grid-2">
-        <Section title="Training loss">
-          <Chart empty="The first loss shows up after the first steps."
-            series={[
-              { label: "each logged step", points: train.map((m) => ({ x: m.step, y: Number(m.loss) })), tone: "muted" },
-              { label: "smoothed", points: smooth(train.map((m) => ({ x: m.step, y: Number(m.loss) }))), tone: "accent" },
-            ]} />
-        </Section>
-        <Section title={metric === "val_loss" ? "Validation loss" : `Validation: ${METRIC_LABEL[metric] ?? metric}`}>
-          <Chart empty="Validation runs before training starts and at every checkpoint."
-            marker={best != null ? { x: best, label: "best" } : undefined}
-            series={[{
-              label: METRIC_LABEL[metric] ?? metric,
-              points: evals.filter((m) => typeof m[metric] === "number").map((m) => ({ x: m.step, y: Number(m[metric]) })),
-              tone: "ok",
-            }]} />
-        </Section>
+        <ChartSection title="Training loss" empty="The first loss shows up after the first steps."
+          series={[
+            { label: "each logged step", points: train.map((m) => ({ x: m.step, y: Number(m.loss) })), tone: "muted" },
+            { label: "smoothed", points: smooth(train.map((m) => ({ x: m.step, y: Number(m.loss) }))), tone: "accent" },
+          ]} />
+        <ChartSection title={metric === "val_loss" ? "Validation loss" : `Validation: ${METRIC_LABEL[metric] ?? metric}`}
+          empty="Validation runs before training starts and at every checkpoint."
+          marker={best != null ? { x: best, label: "best" } : undefined}
+          series={[{
+            label: METRIC_LABEL[metric] ?? metric,
+            points: evals.filter((m) => typeof m[metric] === "number").map((m) => ({ x: m.step, y: Number(m[metric]) })),
+            tone: "ok",
+          }]} />
       </div>
 
       {test && (
@@ -523,8 +484,8 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
       )}
 
       {evals.length > 0 && (
-        <Section title="Validation checks">
-          <div className="preview-scroll">
+        <Section title="Validation checks" aside={evals.length > 1 && <span className="hint">Newest first</span>}>
+          <div className="preview-scroll checks-scroll">
             <table className="table">
               <thead>
                 <tr>
@@ -535,7 +496,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
                 </tr>
               </thead>
               <tbody>
-                {evals.map((m) => (
+                {[...evals].reverse().map((m) => (
                   <tr key={m.step} className={m.step === best ? "best-row" : undefined}>
                     <td>
                       {m.step === 0 ? "0 (before)" : m.step.toLocaleString()}
@@ -562,8 +523,12 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
       )}
 
       {!ACTIVE.has(st.state) && run.versions.length > 0 && (
-        <ExportSection run={run} id={id} best={best}
-          onStarted={() => api<RunDetail>(`/api/runs/${id}`).then(setRun).catch(() => {})} />
+        <>
+          <ExportSection run={run} id={id} best={best}
+            onStarted={() => api<RunDetail>(`/api/runs/${id}`).then(setRun).catch(() => {})} />
+          <UploadSection run={run} id={id} best={best}
+            onStarted={() => api<RunDetail>(`/api/runs/${id}`).then(setRun).catch(() => {})} />
+        </>
       )}
 
       <Section title="Checkpoints">

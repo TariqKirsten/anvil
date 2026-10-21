@@ -40,7 +40,16 @@ export function Segmented<T extends string>(props: {
   );
 }
 
-export function Field(props: { id: string; label: string; error?: string; hint?: string; className?: string; children: ReactNode }) {
+// Under the input: the error if there is one, else a warning (it can go ahead, but should know), else the hint.
+export function Field(props: {
+  id: string;
+  label: string;
+  error?: string;
+  warn?: string;
+  hint?: string;
+  className?: string;
+  children: ReactNode;
+}) {
   return (
     <div className={props.className ? `field ${props.className}` : "field"}>
       <label htmlFor={props.id}>{props.label}</label>
@@ -49,6 +58,8 @@ export function Field(props: { id: string; label: string; error?: string; hint?:
         <p className="field-error" role="alert">
           {props.error}
         </p>
+      ) : props.warn ? (
+        <p className="warn-text">{props.warn}</p>
       ) : props.hint ? (
         <p className="hint">{props.hint}</p>
       ) : null}

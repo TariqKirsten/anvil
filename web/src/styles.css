@@ -1477,6 +1477,89 @@ h1 {
   text-align: center;
 }
 
+/* A chart that opens bigger: a click on it, or its quiet button in the section's head (kept to the head's height). */
+.chart-opens svg {
+  cursor: zoom-in;
+}
+
+button.chart-expand {
+  width: 28px;
+  height: 28px;
+  margin: -6px -6px -6px 0;
+  padding: 0;
+  justify-content: center;
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+}
+
+button.chart-expand:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.chart-grid-x {
+  stroke-dasharray: 2 4;
+}
+
+.chart-dialog {
+  width: min(1200px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100dvh - 32px);
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+}
+
+.chart-dialog:focus {
+  outline: none;
+}
+
+.chart-dialog::backdrop {
+  background: rgba(10, 10, 8, 0.5);
+}
+
+/* The page behind stays where it is while the big chart is open. */
+html:has(.chart-dialog[open]) {
+  overflow: hidden;
+}
+
+.chart-dialog-body {
+  padding: 14px 20px 18px;
+}
+
+.chart-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.chart-dialog-head h2 {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.chart-dialog-head button {
+  flex: none;
+}
+
+@media (max-width: 640px) {
+  .chart-dialog {
+    width: calc(100vw - 16px);
+  }
+
+  .chart-dialog-body {
+    padding: 10px 12px 14px;
+  }
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -1686,6 +1769,33 @@ h1 {
   .nav a {
     padding: 6px 7px;
   }
+}
+
+/* Every check, newest first, in a box of about ten rows that scrolls, so the page doesn't grow with the run. The heads
+   and the steps stay in view while it scrolls either way; a line under the heads stands in for their border, which
+   doesn't scroll with them. */
+.checks-scroll {
+  max-height: 364px;
+  overflow: auto;
+}
+
+.checks-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+  box-shadow: inset 0 -1px 0 var(--border-strong);
+}
+
+.checks-scroll th:first-child,
+.checks-scroll td:first-child {
+  position: sticky;
+  left: 0;
+  background: var(--surface);
+}
+
+.checks-scroll thead th:first-child {
+  z-index: 2;
 }
 
 .table th.picked {
@@ -1979,6 +2089,62 @@ button:disabled {
   flex: none;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* A GGUF file's name beside its type, cut short at the start like the export list's, so its end shows. */
+.upload-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+}
+
+/* An upload: what it was and how it went on one line, what it sent under it, then each repo with a note on how it
+   went, which drops under the repo's name when the row is too narrow for both. */
+.upload-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.upload-what {
+  margin: 2px 0 0;
+}
+
+.upload-repos li {
+  flex-wrap: wrap;
+  row-gap: 0;
+}
+
+.upload-repos a {
+  flex: none;
+  max-width: 100%;
+}
+
+.upload-repos .file-note {
+  margin-left: auto;
+}
+
+.upload-progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 10px;
+}
+
+.upload-progress .bar {
+  flex: 1 1 100%;
+  margin-top: 0;
+}
+
+.upload-progress .hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 /* anvil.json's note is the one thing in the list that wraps, on the narrowest phones, so its name stays whole. */

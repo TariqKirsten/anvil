@@ -48,6 +48,7 @@ export function ExportSection({ run, id, best, onStarted }: {
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const running = run.exports.some((e) => e.state === "starting" || e.state === "running");
+  const uploading = !!run.uploads?.some((u) => u.state === "starting" || u.state === "running");
   const params = run.export_params ?? (run.config.model.params ?? 0) + (run.status.head_m ?? 0) * 1e6;
   const clef = run.config.train_as === "decision" && run.config.method === "clef";
   const toggle = (name: string) =>
@@ -98,10 +99,12 @@ export function ExportSection({ run, id, best, onStarted }: {
         </div>
       </div>
       <div className="export-actions">
-        <button type="button" className="primary" disabled={running || starting || quants.size === 0} onClick={start}>
+        <button type="button" className="primary" disabled={running || uploading || starting || quants.size === 0}
+          onClick={start}>
           <IconPackageExport size={16} aria-hidden /> {starting ? "Starting…" : "Export"}
         </button>
         {running && <span className="hint">One export at a time: wait for this one to finish.</span>}
+        {!running && uploading && <span className="hint">Wait for the upload to Hugging Face to finish.</span>}
       </div>
       {error && <p className="field-error">{error}</p>}
 

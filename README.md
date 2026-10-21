@@ -64,8 +64,9 @@ same settings again is instant.
 ## Training
 
 **Start training** checks the whole form, then starts a separate trainer process. The run gets its own page (Runs,
-top left) with progress (steps and epochs), speed, time left, GPU memory, the loss and validation charts, a table of
-every validation check, the final test, the checkpoints and the log.
+top left) with progress (steps and epochs), speed, time left, GPU memory, the loss and validation charts (a click on
+one opens it bigger, and it follows the run live there too), a table of every validation check (newest first, in a box
+of its own that scrolls), the final test, the checkpoints and the log.
 
 - An **epoch** is one pass over the training rows. A **step** learns from one batch: batch size × the number of
   training cards × gradient accumulation rows. The form shows how many steps an epoch takes; **Max steps** cuts a run
@@ -99,6 +100,12 @@ every validation check, the final test, the checkpoints and the log.
   text.
 - Checkpoints keep the trainable weights and the optimizer, so **Stop** loses at most one step and **Resume** continues
   exactly where it stopped, after a crash too.
+- **Resume** and **Keep training** (below) ask how many epochs the run makes in all, so it can train longer or shorter
+  than it was started with, and a run that has finished can carry on with more. New epochs lift a Max steps limit; a
+  run that Max steps cut short can also resume at that length. The learning rate's schedule then runs to the new last
+  step, while its warmup (and a new Clef head's steps alone) stay as they were. Where the schedule is higher than where
+  the run left off (a finished run's has decayed to nothing), the learning rate climbs back to it over the warmup's
+  steps instead of jumping.
 - A trainer that can't get to the end of its step after Stop (stuck in a GPU collective or other native code) is ended
   outright 10 minutes later, or at once with **Stop now**, which the run page offers while it waits. That loses the
   steps since the newest checkpoint, which Resume trains again. A checkpoint being saved always gets to finish, and a
@@ -117,7 +124,7 @@ every validation check, the final test, the checkpoints and the log.
   `anvil.json` says which checkpoint it is and what it scored on the test set.
 - **Delete** (on the page of a run that has finished, failed or stopped) removes the run for good: checkpoints, the
   finished model, metrics and the log. It says how much space that frees and asks first. A run that's still training,
-  or whose judge is still checking, can't be deleted.
+  whose judge is still checking, or that's being exported or uploaded can't be deleted.
 
 ### Exporting as GGUF
 
@@ -133,6 +140,27 @@ every validation check, the final test, the checkpoints and the log.
   input (`-c 8192 -b 8192 -ub 8192`), since a decision model reads a whole input in one batch.
 - Checked on 60 validation questions each: BF16, Q8_0 and Q4_K_M files of a letters model, and a Q8_0 Clef file, all
   gave the same answers as the model they came from (probabilities within 0.001 to 0.013 on average).
+
+### Uploading to Hugging Face
+
+- **Upload to Hugging Face** on a run's page (once it has finished or stopped) sends a version, the finished model or
+  any checkpoint still kept, to the account whose token is in Settings: its weights, its GGUF files from Export as
+  GGUF, or both. Pick **Private** or **Public**.
+- The weights are the whole model in Hugging Face format (safetensors; a LoRA checkpoint is merged into the base model
+  on the way), or for LoRA the adapter alone. A Clef model's head files go along, as Cloudflare's releases ship them.
+- The GGUF files go to a repo of their own, `<name>-GGUF`, Hugging Face's usual way; give the weights' repo instead to
+  keep them together. Repos can be on your account or an organisation's that the token may write to.
+- A repo that doesn't exist yet is made. One that does gets the files added (replacing any of the same name) and is
+  set to the visibility picked; the page says which will happen before you upload.
+- Each repo gets a model card (`README.md`): what the model is and what it was fine-tuned from, how it scored on the
+  test set (each question's score too, for decision models), how to use it, and how it was trained. It never names
+  this machine's folders. A card you've edited on Hugging Face stays as it is: anvil only replaces a card it wrote
+  that nobody has changed since.
+- It runs as a process of its own on the CPU, so a restart of the server doesn't cut it off, with progress on the page.
+  A repo's files change only once its upload has finished (one commit per repo), so **Cancel**, or a failed upload,
+  leaves them as they were. The details are in the run's folder under `uploads/<when>/`.
+- It needs a token that can write: a write token, or a fine-grained one allowed to write to your account or the
+  organisation. A read token can't upload.
 
 ### Several GPUs
 
@@ -167,8 +195,9 @@ every validation check, the final test, the checkpoints and the log.
 - **Stop after no gain for** N checks ends training early once the score hasn't improved for N checks in a row
   (0 turns this off). Only the checks after the warmup count, and for a new Clef head after its steps alone too:
   until then the scores say little about where the model is going.
-- **Keep training**, on a run that stopped early before its last step, carries on from the newest checkpoint. It asks
-  again: stop early after N more checks without a gain, or train to the last step.
+- **Keep training**, on a run that has finished, carries on from the newest checkpoint: one that stopped early before
+  its last step, or, given more epochs, one that got there. It asks again: stop early after N more checks without a
+  gain, or train to the last step.
 - When training ends, the best checkpoint becomes the model and is scored once on the test set (up to 5,000 rows).
   The test set plays no part in picking, so that's the fair number to quote.
 
@@ -180,7 +209,8 @@ fast kernels for linear-attention models such as Qwen3.5. On an R9700 that makes
 
 - anvil starts with one account, `admin`. Change its password in Settings (the gear, top right).
 - Paste your Hugging Face token in Settings. anvil checks it with Hugging Face, keeps it on the server, and never
-  shows it again. Public models work without a token; gated ones (like Llama) need it.
+  shows it again. Public models work without a token; gated ones (like Llama) need it, and uploading needs one that
+  can write.
 - Forgot the password? Put a new one in `ANVIL_PASSWORD`, add `ANVIL_RESET_PASSWORD=1`, restart, then remove that
   line again.
 
@@ -194,6 +224,7 @@ fast kernels for linear-attention models such as Qwen3.5. On an R9700 that makes
 | `server/anvil/judge.py` | The judge process: checks checkpoints on a spare GPU; `picking.py` ranks them and decides when to stop |
 | `server/anvil/parallel.py` | Training on several GPUs at once: one process per card, gradients averaged every step |
 | `server/anvil/export.py` | Exporting a version of a run as GGUF with llama.cpp: merge, convert, quantize |
+| `server/anvil/upload.py` | Uploading a version of a run to Hugging Face: its weights and GGUF files, with model cards |
 | `server/anvil/vendor/clef/` | Cloudflare's Clef reference code and licence (Apache-2.0), unmodified; see its `NOTICE.md` |
 | `server/tests/` | `docker compose exec -w /workspace/server dev python -m pytest` |
 | `web/src/` | The React screen: `Finetune.tsx`, `Runs.tsx`, `RunPage.tsx`, `Settings.tsx`, sections in `sections/` |
@@ -215,4 +246,6 @@ Built in steps:
 7. **GGUF export** (done): the finished model or any kept checkpoint, as BF16 to Q4_K_M, for llama.cpp and the like.
 
 Since then: every question scored by its type (yes/no, choice, score) for any dataset, a By question table, Pick best
-by that follows the data (with Overall for mixed data), and the catch rate's false alarm allowance as a setting.
+by that follows the data (with Overall for mixed data), and the catch rate's false alarm allowance as a setting. Then:
+Resume and Keep training with a new number of epochs, charts that open bigger, the validation checks newest first in
+a box that scrolls, and uploading a run's weights and GGUF files to Hugging Face.

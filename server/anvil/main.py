@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -367,6 +368,91 @@ def download_export(run_id: str, version: str, name: str):
         raise HTTPException(404, str(exc)) from exc
 
 
+class UploadBody(BaseModel):
+    version: str
+    weights: str | None = None  # "merged" (the whole model) or "adapter" (LoRA's alone); None: GGUF files only
+    gguf: list[str] = []  # GGUF files from the version's export
+    repo: str | None = None  # where the weights go
+    gguf_repo: str | None = None  # where the GGUF files go (the same repo is fine)
+    private: bool = True
+
+
+@app.post("/api/runs/{run_id}/uploads")
+def start_upload(run_id: str, body: UploadBody, request: Request) -> dict:
+    try:
+        return {"id": runs.start_upload(run_id, body.model_dump(), hf_token(request))}
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/runs/{run_id}/uploads/{upload_id}/cancel")
+def cancel_upload(run_id: str, upload_id: str) -> dict:
+    try:
+        runs.cancel_upload(run_id, upload_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True}
+
+
+_accounts: dict[str, tuple[float, dict]] = {}  # token -> (when, what whoami said), so the screen can ask often
+
+
+def hub_account(token: str) -> dict:
+    """Whose a token is, and where it can upload: the account's own namespace and the organisations it may write to.
+    write: whether it can write at all (a read token can't)."""
+    cached = _accounts.get(token)
+    if cached and time.time() - cached[0] < 300:  # Hugging Face limits how often whoami may be asked
+        return cached[1]
+    info = hub_whoami(token)
+    access = (info.get("auth") or {}).get("accessToken") or {}
+    name = info.get("name")
+    orgs = [o["name"] for o in info.get("orgs") or [] if o.get("name") and o.get("roleInOrg") != "read"]
+    if access.get("role") == "fineGrained":
+        scoped = (access.get("fineGrained") or {}).get("scoped") or []
+        places = [s["entity"]["name"] for s in scoped if "repo.write" in (s.get("permissions") or [])
+                  and (s.get("entity") or {}).get("name")]
+        namespaces = [n for n in [name, *orgs] if n in places]
+    elif access.get("role") == "read":
+        namespaces = []
+    else:  # a write token (or one from before roles): the account's own, and its organisations'
+        namespaces = [name, *orgs]
+    found = {"name": name, "namespaces": namespaces, "write": bool(namespaces)}
+    _accounts[token] = (time.time(), found)
+    return found
+
+
+@app.get("/api/hub/me")
+def hub_me(request: Request) -> dict:
+    token = hf_token(request)
+    if not token:
+        return {"connected": False, "name": None, "namespaces": [], "write": False}
+    try:
+        return {"connected": True, **hub_account(token)}
+    except Exception as exc:
+        raise HTTPException(502, "Couldn't reach Hugging Face to see whose the token is.") from exc
+
+
+@app.get("/api/hub/repo")
+def hub_repo(request: Request, repo: str) -> dict:
+    """Whether a repo exists (that the token can see), and if so whether it's private."""
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    if not REPO_ID.match(repo):
+        raise HTTPException(400, "A repository looks like your-name/model-name.")
+    try:
+        info = HfApi().repo_info(repo, token=hf_token(request))
+    except RepositoryNotFoundError:
+        return {"exists": False, "private": None}
+    except Exception as exc:
+        raise HTTPException(502, f"Couldn't reach Hugging Face: {exc}") from exc
+    return {"exists": True, "private": bool(info.private)}
+
+
 class StopBody(BaseModel):
     now: bool = False  # Stop now: end the trainer at once, not after this step (losing the steps since its checkpoint)
 
@@ -384,12 +470,13 @@ def stop_run(run_id: str, body: StopBody | None = None) -> dict:
 
 class ResumeBody(BaseModel):
     patience: int | None = None  # more checks without a gain to wait; 0 trains to the last step
+    epochs: int | None = None  # passes over the training data in all, from the start; lifts a Max steps limit
 
 
 @app.post("/api/runs/{run_id}/resume")
 def resume_run(run_id: str, request: Request, body: ResumeBody | None = None) -> dict:
     try:
-        runs.resume(run_id, hf_token(request), body.patience if body else None)
+        runs.resume(run_id, hf_token(request), body.patience if body else None, body.epochs if body else None)
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

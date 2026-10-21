@@ -131,6 +131,29 @@ def test_a_clef_run_stops_and_resumes(tmp_path, tiny_model):
     assert done["state"] == "done" and done["step"] == 200
 
 
+def test_more_epochs_on_resume_keep_a_new_heads_steps_alone(tmp_path, tiny_model, monkeypatch):
+    from anvil import config, runs
+
+    monkeypatch.setattr(config, "settings", config.Settings(password="x", data=tmp_path / "data", hf_token=None))
+    monkeypatch.setattr(runs.gpus, "list_gpus", lambda: {"gpus": [{"index": 0, "display": False, "busy": False}]})
+    procs = []
+    monkeypatch.setattr(runs, "_spawn", lambda run_id, path, gpus, token, resume, judge_gpu=None:
+                        procs.append(start(path, resume=resume)))
+    data = prepared(tmp_path, decision_rows(80), decision_rows(8, seed=1))  # 107 rows: 27 steps of 4
+    cfg = clef_config(tiny_model, data, maxSteps=20, every=10, warmupPercent=10)
+    cfg["checkpoints"].update(patience=0)
+    (tmp_path / "data" / "runs").mkdir(parents=True)
+    run_dir = make_run(tmp_path / "data" / "runs", cfg, "clef-more")
+    first = finish(start(run_dir), run_dir)
+    assert first["step"] == 20 and first["head_first"] == 2 and first["warm_until"] == 3, first
+    runs.resume("clef-more", None, patience=0, epochs=2)  # 54 steps, past Max steps' 20
+    status = finish(procs[-1], run_dir, timeout=400)
+    assert status["state"] == "done" and status["step"] == 54, status
+    # Not a tenth of 54: the model has trained alongside the head since step 2, and goes on doing so.
+    assert status["head_first"] == 2 and status["warm_until"] == 3
+    assert all(m["lr"] > 0 for m in metrics(run_dir) if m["type"] == "train" and 20 < m["step"] < 54)
+
+
 def test_the_judge_checks_clef_checkpoints_with_their_heads(tmp_path, tiny_model):
     data = prepared(tmp_path, decision_rows(40), decision_rows(12, seed=1))
     cfg = clef_config(tiny_model, data, maxSteps=6, every=2, learningRate="3e-2")

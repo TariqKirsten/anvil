@@ -94,7 +94,7 @@ function HuggingFace({ hf, onChange }: { hf: HfStatus; onChange: (hf: HfStatus) 
           id="hf-token"
           label={hf.source === "account" ? "Replace the token" : "Access token"}
           error={error ?? undefined}
-          hint="Needed for gated models like Llama, and later for uploading your models."
+          hint="Needed for gated models like Llama, and for uploading your models from a run's page."
         >
           <input
             id="hf-token"
@@ -126,8 +126,8 @@ function HuggingFace({ hf, onChange }: { hf: HfStatus; onChange: (hf: HfStatus) 
         <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">
           huggingface.co/settings/tokens
         </a>
-        . A read token is enough for downloads. anvil checks it with Hugging Face, keeps it on the server, and never
-        shows it again.
+        . A read token is enough for downloads; uploading needs one that can write. anvil checks it with Hugging Face,
+        keeps it on the server, and never shows it again.
       </p>
     </Section>
   );
