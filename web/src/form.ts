@@ -42,6 +42,8 @@ export interface FormState {
     precision: "bf16" | "fp16";
     gradCheckpointing: boolean;
     maxSteps: number;
+    // Full fine-tuning only: the weights stay bf16 (updates rounded stochastically) or go to fp32 (twice the memory).
+    masterWeights: "bf16" | "fp32";
   };
   // falseAlarmPercent: the catch rate counts the yes cases caught when at most this share of no cases is flagged.
   // minGain: a check beats the best only by more than this (in the score's own units; 0 counts any rise).
@@ -126,6 +128,7 @@ export const DEFAULTS: FormState = {
     precision: "bf16",
     gradCheckpointing: true,
     maxSteps: 0,
+    masterWeights: "bf16",
   },
   checkpoints: { every: 500, keepBest: 3, patience: 3, pickBy: "overall", falseAlarmPercent: 1, minGain: 0 },
 };

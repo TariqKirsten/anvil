@@ -35,7 +35,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import picking
+from . import optim, picking
 
 if os.environ.get("ANVIL_SAFE_KERNELS") == "1":
     # The slow but plain paths, for models whose fast kernels misbehave. Must run before any model code is imported.
@@ -157,11 +157,13 @@ def load_model(cfg: dict, device, dtype, checkpoint: Path | None):
     tok = AutoTokenizer.from_pretrained(tokenizer_from, token=token, trust_remote_code=remote)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    # Full fine-tuning keeps the weights in fp32 and computes in bf16 (autocast), the way mixed precision works: in
-    # bf16 weights most of the optimizer's small updates would round away (a step of 2e-5 on a weight near 0.02 is
-    # below bf16's resolution there), so the model would learn little at a sane learning rate. That takes 16 bytes a
-    # parameter with AdamW. LoRA's base model stays bf16, since it's frozen; PEFT keeps the adapter weights in fp32.
-    load_dtype = None if device.type != "cuda" else dtype if lora else torch.float32
+    # Full fine-tuning keeps the weights in bf16, so a 2B model fits a 32 GB card, and the optimizer (anvil.optim)
+    # rounds its updates stochastically, since plain rounding loses most small updates in bf16. "Weights while
+    # training" under Advanced puts them in fp32 instead, at twice the memory, as mixed precision does. LoRA's base
+    # model stays bf16, since it's frozen; PEFT keeps the adapter weights in fp32. On the CPU (the tests) LoRA's base
+    # model is fp32, like everything else there.
+    fp32_weights = not lora and h.get("masterWeights") == "fp32"
+    load_dtype = None if fp32_weights or (lora and device.type != "cuda") else dtype
     model = AutoModelForCausalLM.from_pretrained(weights, dtype=load_dtype, token=token,
                                                  trust_remote_code=remote).to(device)
     model.config.use_cache = False
@@ -394,7 +396,12 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     groups = [{"params": backbone, "lr": float(h["learningRate"])}]
     if head:
         groups.append({"params": head, "lr": float(h.get("headLearningRate") or HEAD_LR)})
-    opt = torch.optim.AdamW(groups, weight_decay=float(h["weightDecay"]))
+    if any(p.dtype == torch.bfloat16 for p in backbone):  # full fine-tuning in bf16: updates rounded stochastically
+        rounding = torch.Generator(device=device)
+        rounding.manual_seed(seed)  # the same on every card, so their copies round alike and stay identical
+        opt = optim.AdamW(groups, weight_decay=float(h["weightDecay"]), generator=rounding)
+    else:
+        opt = torch.optim.AdamW(groups, weight_decay=float(h["weightDecay"]))
     # A new head is random at first, so the model would learn from noise: the head trains alone for a while.
     head_first = int(total * HEAD_FIRST) if fresh_head(cfg) else 0
 
@@ -721,7 +728,7 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
         task.save(out / "adapter")
         write_json(out / "adapter" / "anvil.json", about)
         model = model.merge_and_unload()
-    elif device.type == "cuda":
+    elif device.type == "cuda" and next(model.parameters()).dtype != dtype:
         model = model.to(dtype)  # trained with fp32 weights; the finished model is bf16 (or fp16), like its base
     model.save_pretrained(out / "merged")
     tok.save_pretrained(out / "merged")

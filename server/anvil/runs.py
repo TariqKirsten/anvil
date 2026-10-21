@@ -192,6 +192,8 @@ def _check_hyper(h: dict) -> None:
             raise ValueError(f"{key} must be a whole number of at least {low}.")
     if int(h.get("maxSteps") or 0) < 0:
         raise ValueError("Max steps can't be negative.")
+    if h.get("masterWeights", "bf16") not in ("bf16", "fp32"):
+        raise ValueError("The weights while training must be bf16 or fp32.")
 
 
 def _check_picking(checkpoints: dict, train_as: str, report: dict) -> dict:

@@ -432,6 +432,27 @@ def test_a_steps_loss_weighs_every_token_the_same_whatever_batch_it_is_in(tmp_pa
     assert state["tokens"] == status["tokens_seen"]
 
 
+def test_a_full_fine_tune_trains_bf16_weights_with_stochastic_rounding(tmp_path, tiny_model):
+    import torch
+    from safetensors.torch import load_file
+
+    chats = pd.DataFrame({"messages": [json.dumps([{"role": "user", "content": f"hello {w}"},
+                                                   {"role": "assistant", "content": f"thanks {w}"}]) for w in WORDS]})
+    data = prepared(tmp_path, chats, chats.head(4))
+    cfg = run_config(tiny_model, data, train_as="lm", fmt="chat", maxSteps=6, every=3, learningRate="1e-4")
+    cfg["training_type"] = "full"
+    run_dir = make_run(tmp_path, cfg)
+    status = finish(start(run_dir), run_dir)
+    assert status["state"] == "done" and status["step"] == 6
+    saved = load_file(str(run_dir / "checkpoints" / "step-0000006" / "model" / "model.safetensors"))
+    before = load_file(str(tiny_model / "model.safetensors"))
+    assert all(v.dtype == torch.bfloat16 for v in saved.values())  # the weights stayed bf16
+    moved = sum((saved[k].float() != before[k].float()).sum().item() for k in saved) / sum(v.numel() for v in saved.values())
+    assert moved > 0.3, moved  # at 1e-4 on bf16 weights, most updates would round away without the rounding
+    assert "optimizer" in torch.load(run_dir / "checkpoints" / "step-0000006" / "optimizer.pt", weights_only=False)
+    assert (run_dir / "model" / "merged" / "model.safetensors").exists()
+
+
 def test_rows_cut_to_fit_max_length_are_counted(tmp_path, tiny_model, monkeypatch):
     from anvil import parallel, train
 
@@ -628,6 +649,7 @@ def test_a_running_run_or_its_judge_blocks_deleting(run_settings):
     ({"hyper": {**FORM["hyper"], "learningRate": "fast"}}, "isn't a number"),
     ({"checkpoints": {**FORM["checkpoints"], "minGain": -1}}, "least gain that counts"),
     ({"checkpoints": {**FORM["checkpoints"], "minGain": "lots"}}, "least gain that counts"),
+    ({"hyper": {**FORM["hyper"], "masterWeights": "fp64"}}, "bf16 or fp32"),
 ])
 def test_unsupported_runs_say_why(run_settings, change, reason):
     with pytest.raises(ValueError, match=reason):

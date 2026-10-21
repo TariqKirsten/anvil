@@ -93,12 +93,23 @@ export function HyperSection({ form, update, errors, cards, trainItems }: Sectio
             </select>
           </Field>
           {lora && num("loraAlpha", "LoRA alpha", 1, "usually 2 × rank")}
+          {!lora && (
+            <Field id="masterWeights" label="Weights while training"
+              hint={h.masterWeights === "fp32" ? "about twice the memory of bf16" : "updates rounded stochastically, so small ones add up"}>
+              <select id="masterWeights" value={h.masterWeights}
+                onChange={(e) => setH({ masterWeights: e.target.value as Hyper["masterWeights"] })}>
+                <option value="bf16">bf16</option>
+                <option value="fp32">fp32</option>
+              </select>
+            </Field>
+          )}
           {num("maxSteps", "Max steps", 1, cut ? `${cut}; 0 = all epochs` : "0 = all epochs; set it for quick test runs")}
         </div>
       ) : (
         <p className="hint">
           Warmup {h.warmupPercent}% · {h.scheduler} · weight decay {h.weightDecay} · max length {h.maxLength} ·{" "}
-          {h.precision} · seed {h.seed}{h.maxSteps ? ` · stops after ${h.maxSteps} steps${cut ? ` (${cut})` : ""}` : ""}
+          {h.precision} · seed {h.seed}{!lora && h.masterWeights === "fp32" ? " · fp32 weights" : ""}
+          {h.maxSteps ? ` · stops after ${h.maxSteps} steps${cut ? ` (${cut})` : ""}` : ""}
         </p>
       )}
     </Section>

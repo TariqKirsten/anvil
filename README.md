@@ -107,11 +107,15 @@ answers the same three validation prompts, shown next to the replies the data gi
   learns to stop), prompt and completion (only the completion, ended the same way), or plain text. Plain text and
   prompts start with the model's beginning-of-text token when its tokenizer uses one (Llama, Gemma; Qwen has none).
   A row longer than Max length is cut to fit; the run page counts them, since a cut reply loses its ending.
-- **Full** fine-tuning keeps the weights in fp32 while training and computes in bf16, as mixed precision does: in bf16
-  weights most of the optimizer's small updates round away (at 2e-5 on Qwen3.5-0.8B, half the weights don't move at
-  all in a step). That takes 16 bytes a parameter plus the activations, about 1B parameters on a 32 GB card; LoRA
-  for bigger models. The finished model is saved in bf16, like its base. The form's learning rate for Full is 2e-5
-  (1e-5 with the Clef head), a tenth of LoRA's.
+- **Full** fine-tuning keeps the weights in bf16, about 8 bytes a parameter with AdamW's two moments plus the
+  activations, so a 2B model fits a 32 GB card. bf16 can't hold a small update: a step of 2e-5 on a weight near 0.02
+  is below its resolution, so a plain optimizer rounds most updates away (on Qwen3.5-0.8B half the weights didn't
+  move at all in a step at 2e-5) and rounds the rest up to a whole unit. anvil's optimizer (`anvil/optim.py`) does
+  the maths in fp32 and rounds the results into bf16 stochastically, up or down with the probability of where the
+  value lies, so the weights and Adam's moments are right on average and small updates add up over steps. **Weights
+  while training** under Advanced puts the weights in fp32 instead, as mixed precision does, at twice the memory
+  (about 1B parameters on a 32 GB card); the finished model is saved in bf16 either way. The form's learning rate
+  for Full is 2e-5 (1e-5 with the Clef head), a tenth of LoRA's.
 - Checkpoints keep the trainable weights and the optimizer, so **Stop** loses at most one step and **Resume** continues
   exactly where it stopped, after a crash too.
 - A trainer that can't get to the end of its step after Stop (stuck in a GPU collective or other native code) is ended

@@ -55,7 +55,7 @@ export function TrainAs({ form, update }: SectionProps) {
         </div>
         <Field id="training-type" label="Training type"
           hint={form.trainingType === "full"
-            ? "Every weight trains, in fp32: about 16 bytes a parameter plus the activations, so up to about 1B parameters on a 32 GB card. LoRA for bigger models."
+            ? "Every weight trains, in bf16: about 8 bytes a parameter plus the activations with AdamW, so a 2B model fits a 32 GB card. Small updates aren't lost: the optimizer rounds them stochastically. fp32 weights, at twice the memory, are under Advanced."
             : undefined}>
           <select
             id="training-type"
