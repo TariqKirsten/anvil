@@ -64,17 +64,25 @@ same settings again is instant.
 ## Training
 
 **Start training** checks the whole form, then starts a separate trainer process. The run gets its own page (Runs,
-top left) with progress (steps and epochs), speed, time left, GPU memory, the loss and validation charts, a table of
-every validation check, the final test, the checkpoints and the log.
+top left) with progress (steps and epochs), speed, time left, GPU memory, the gradient norm, the tokens trained on, the
+padding and the rows cut by max length, the loss and validation charts (the validation loss on the training chart too,
+so the gap between them shows), the gradient norm and learning rate charts, a table of every validation check, the
+final test, the checkpoints and the log. A language model's page also has sample replies: at every check the model
+answers the same three validation prompts, shown next to the replies the data gives.
 
 - An **epoch** is one pass over the training rows. A **step** learns from one batch: batch size × the number of
   training cards × gradient accumulation rows. The form shows how many steps an epoch takes; **Max steps** cuts a run
   short (handy for quick tests).
 
+- Every token a language model learns from, and every question a decision model answers, weighs the same in a step:
+  the step's loss is averaged over all of its batches (gradient accumulation) and all of its cards together, so a
+  batch of short rows doesn't count as much as a batch of long ones. The training loss on the run page is that
+  average, so it compares with the validation loss.
+
 - **Decision models** train one of two ways (Method, under Train as):
   - **Letters**: each question lists its options as A, B, C… and the model's scores for the letters are its answer.
-    Option order is shuffled per row so no letter is favoured; validation asks every question in both orders and
-    averages. Nothing is added to the model. One pass per question.
+    Option order is shuffled per row, and differently in each epoch, so no letter is favoured; validation asks every
+    question in both orders and averages. Nothing is added to the model. One pass per question.
   - **Clef head**: Cloudflare's design. A row's state and all its questions are one prompt, and a small new network
     (the head, about 30M parameters on a 2B model) reads the model's hidden states at each question and option and
     scores every option: one pass per row. A new head trains alone for the first 10% of the steps, at its own learning
@@ -95,8 +103,15 @@ every validation check, the final test, the checkpoints and the log.
   - The run page has a **By question** table for any check or the final test, with how many rows asked each question
     and how often each answer came up. An answer seen fewer than 30 times shows in amber: the scores beside it are
     rough.
-- **Language models** learn chat (only the assistant's replies), prompt and completion (only the completion), or plain
-  text.
+- **Language models** learn chat (only the assistant's replies, each with the token that ends its turn, so the model
+  learns to stop), prompt and completion (only the completion, ended the same way), or plain text. Plain text and
+  prompts start with the model's beginning-of-text token when its tokenizer uses one (Llama, Gemma; Qwen has none).
+  A row longer than Max length is cut to fit; the run page counts them, since a cut reply loses its ending.
+- **Full** fine-tuning keeps the weights in fp32 while training and computes in bf16, as mixed precision does: in bf16
+  weights most of the optimizer's small updates round away (at 2e-5 on Qwen3.5-0.8B, half the weights don't move at
+  all in a step). That takes 16 bytes a parameter plus the activations, about 1B parameters on a 32 GB card; LoRA
+  for bigger models. The finished model is saved in bf16, like its base. The form's learning rate for Full is 2e-5
+  (1e-5 with the Clef head), a tenth of LoRA's.
 - Checkpoints keep the trainable weights and the optimizer, so **Stop** loses at most one step and **Resume** continues
   exactly where it stopped, after a crash too.
 - A trainer that can't get to the end of its step after Stop (stuck in a GPU collective or other native code) is ended
@@ -215,4 +230,8 @@ Built in steps:
 7. **GGUF export** (done): the finished model or any kept checkpoint, as BF16 to Q4_K_M, for llama.cpp and the like.
 
 Since then: every question scored by its type (yes/no, choice, score) for any dataset, a By question table, Pick best
-by that follows the data (with Overall for mixed data), and the catch rate's false alarm allowance as a setting.
+by that follows the data (with Overall for mixed data), and the catch rate's false alarm allowance as a setting. Then
+a pass over what limits the quality of the fine-tunes: every token weighs the same across a step's batches and cards,
+full fine-tuning keeps fp32 weights, chat replies that echo the user are learned from the right turn, text starts with
+the model's BOS token, and the run page shows the gradient norm, the learning rate, what the run has seen, token
+accuracy and sample replies.

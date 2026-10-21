@@ -74,13 +74,17 @@ export function pickByOptions(trainAs: TrainAs, types: Set<QuestionType> | null,
 }
 
 // The model's learning rate that suits each way of training. Clef from a plain model learned nothing at letters'
-// 2e-4 (the model's features moved faster than the new head could follow); 5e-5 worked.
-export function defaultLearningRate(form: Pick<FormState, "trainAs" | "decisionMethod">) {
-  return form.trainAs === "decision" && form.decisionMethod === "clef" ? "5e-5" : "2e-4";
+// 2e-4 (the model's features moved faster than the new head could follow); 5e-5 worked. Full fine-tuning moves every
+// weight, so it takes a tenth of LoRA's rate.
+export function defaultLearningRate(form: Pick<FormState, "trainAs" | "decisionMethod" | "trainingType">) {
+  const clef = form.trainAs === "decision" && form.decisionMethod === "clef";
+  if (form.trainingType === "full") return clef ? "1e-5" : "2e-5";
+  return clef ? "5e-5" : "2e-4";
 }
 
 // Switching the way of training moves the learning rate to the new default, unless you've set your own.
-export function withMethod(form: FormState, change: Partial<Pick<FormState, "trainAs" | "decisionMethod">>): FormState {
+export function withMethod(form: FormState,
+  change: Partial<Pick<FormState, "trainAs" | "decisionMethod" | "trainingType">>): FormState {
   const next = { ...form, ...change };
   const untouched = form.hyper.learningRate.trim() === defaultLearningRate(form);
   return untouched ? { ...next, hyper: { ...next.hyper, learningRate: defaultLearningRate(next) } } : next;

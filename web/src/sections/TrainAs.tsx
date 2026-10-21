@@ -53,11 +53,14 @@ export function TrainAs({ form, update }: SectionProps) {
           )}
           <p className="hint">{METHOD_HINTS[decision ? form.decisionMethod : form.lmFormat]}</p>
         </div>
-        <Field id="training-type" label="Training type">
+        <Field id="training-type" label="Training type"
+          hint={form.trainingType === "full"
+            ? "Every weight trains, in fp32: about 16 bytes a parameter plus the activations, so up to about 1B parameters on a 32 GB card. LoRA for bigger models."
+            : undefined}>
           <select
             id="training-type"
             value={form.trainingType}
-            onChange={(e) => update((f) => ({ ...f, trainingType: e.target.value as FormState["trainingType"] }))}
+            onChange={(e) => update((f) => withMethod(f, { trainingType: e.target.value as FormState["trainingType"] }))}
           >
             <option value="lora">LoRA</option>
             <option value="qlora">QLoRA (4-bit)</option>

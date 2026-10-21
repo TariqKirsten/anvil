@@ -33,7 +33,14 @@ function nearest(steps: number[], x: number) {
   return steps[hi] - x < x - steps[lo] ? steps[hi] : steps[lo];
 }
 
-export function Chart({ series, empty, marker }: { series: Series[]; empty: string; marker?: { x: number; label: string } }) {
+// format: how a value reads on the axis and in the box of values, for numbers the decimals of the range don't suit
+// (a learning rate of 5e-5, say).
+export function Chart({ series, empty, marker, format }: {
+  series: Series[];
+  empty: string;
+  marker?: { x: number; label: string };
+  format?: (y: number) => string;
+}) {
   const [box, setBox] = useState<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(520);
   const [hover, setHover] = useState<number | null>(null); // the step whose values show
@@ -111,7 +118,7 @@ export function Chart({ series, empty, marker }: { series: Series[]; empty: stri
         {grid.map((g) => (
           <g key={g}>
             <line x1={PAD.left} x2={width - PAD.right} y1={sy(g)} y2={sy(g)} className="chart-grid" />
-            <text x={PAD.left - 6} y={sy(g) + 4} textAnchor="end" className="chart-label">{g.toFixed(digits)}</text>
+            <text x={PAD.left - 6} y={sy(g) + 4} textAnchor="end" className="chart-label">{format ? format(g) : g.toFixed(digits)}</text>
           </g>
         ))}
         {marker && marker.x >= x0 && marker.x <= x1 && (
@@ -156,7 +163,7 @@ export function Chart({ series, empty, marker }: { series: Series[]; empty: stri
           {hits.map(({ s, p }) => (
             <div key={s.label} className="chart-tip-row">
               <span className={`chart-key chart-${s.tone ?? "accent"}`}>{s.label}</span>
-              <span className="chart-tip-value">{p.y.toFixed(Math.min(4, digits + 1))}</span>
+              <span className="chart-tip-value">{format ? format(p.y) : p.y.toFixed(Math.min(4, digits + 1))}</span>
             </div>
           ))}
         </div>

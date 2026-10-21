@@ -48,6 +48,7 @@ def run(cfg: dict, run_dir: Path, report: train.Reporter) -> None:
         report.update(state="checking", stage=f"Checking step {step}", step=step)
         model.eval()
         metrics = task.evaluate(model, val_items, val_parsed, batch, autocast)
+        metrics = train.with_samples(metrics, task.samples(model, val_items, val_parsed, autocast))
         report.metric({"type": "eval", "step": step, "by": "judge", **metrics})
         with picking.updating(run_dir) as board:
             picking.record(board, step, metrics, pick_by)

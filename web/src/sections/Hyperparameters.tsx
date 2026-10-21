@@ -28,6 +28,10 @@ export function HyperSection({ form, update, errors, cards, trainItems }: Sectio
     : "passes over the training data";
   const cut = h.maxSteps && stepsPerEpoch ? `${percent(h.maxSteps, stepsPerEpoch)} of an epoch` : null;
   const lora = form.trainingType !== "full";
+  const lr = Number(h.learningRate);
+  const lrHint = !lora && lr > 5e-5 ? "High for full fine-tuning, where every weight moves: 1e-5 to 3e-5 is usual"
+    : clef && lr > 1e-4 ? "High for Clef: 5e-5 works, 2e-4 stopped it learning"
+    : clef ? "for the model; the head has its own below" : undefined;
   const setH = (change: Partial<Hyper>) => update((f) => ({ ...f, hyper: { ...f.hyper, ...change } }));
   const num = (key: keyof Hyper, label: string, step = 1, hint?: string) => (
     <Field id={key} label={label} error={errors[key]} hint={hint}>
@@ -39,10 +43,7 @@ export function HyperSection({ form, update, errors, cards, trainItems }: Sectio
   return (
     <Section title="Hyperparameters">
       <div className="grid-4">
-        <Field id="learningRate" label="Learning rate" error={errors.learningRate}
-          hint={!clef ? undefined : Number(h.learningRate) > 1e-4
-            ? "High for Clef: 5e-5 works, 2e-4 stopped it learning"
-            : "for the model; the head has its own below"}>
+        <Field id="learningRate" label="Learning rate" error={errors.learningRate} hint={lrHint}>
           <input id="learningRate" value={h.learningRate} aria-invalid={errors.learningRate ? true : undefined}
             onChange={(e) => setH({ learningRate: e.target.value })} />
         </Field>

@@ -5,10 +5,12 @@ import { IconArrowLeft, IconPlayerPlay, IconPlayerStop, IconTrash } from "@table
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { Chart } from "./Chart";
+import { MoreStats, TrainingCharts } from "./Diagnostics";
 import { ExportSection } from "./ExportSection";
 import { bytes } from "./format";
 import { QuestionScores, questionsOf, type ScoredCheck } from "./QuestionScores";
 import { METRIC_LABEL, STATE_LABEL, stateTone, when } from "./Runs";
+import { Samples, type SampledCheck } from "./Samples";
 import { Topbar } from "./Topbar";
 import type { RunDetail, RunMetric } from "./types";
 import { Badge, Field, NumberInput, Section, Segmented } from "./ui";
@@ -277,6 +279,8 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
     columns.push(["ece", "Calib. error", "Calibration error: confidence vs how often it's right (lower is better)"]);
   } else {
     columns.push(["perplexity", "Perplexity", "e to the validation loss"]);
+    if (has("token_accuracy"))
+      columns.push(["token_accuracy", "Token accuracy", "Share of the tokens it learns from whose top guess is right"]);
   }
   // Each question's scores: at the final test, and at every check, newest first.
   const scored: ScoredCheck[] = decision
@@ -290,6 +294,15 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
       ].filter((c) => questionsOf(c.scores))
     : [];
   const preferred = test ? "test" : best != null ? `step-${best}` : evals.length ? `step-${evals[evals.length - 1].step}` : "";
+  // A language model's sample replies: at the final test, and at every check, newest first.
+  const sampled: SampledCheck[] = decision ? [] : [
+    ...(test?.samples?.length ? [{ key: "test", label: `Final test · step ${test.step.toLocaleString()}`, samples: test.samples }] : []),
+    ...[...evals].reverse().filter((m) => m.samples?.length).map((m) => ({
+      key: `step-${m.step}`,
+      label: `Validation · step ${m.step === 0 ? "0 (before training)" : m.step.toLocaleString()}${m.step === best ? " · best" : ""}`,
+      samples: m.samples!,
+    })),
+  ];
 
   return (
     <div className="page">
@@ -428,6 +441,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           <div><span className="stat-label">Time left</span><span className="stat-value">{ACTIVE.has(st.state) && !stopping ? duration(st.eta_s) : "–"}</span></div>
           <div><span className="stat-label">Speed</span><span className="stat-value">{st.tokens_per_s ? `${Math.round(st.tokens_per_s).toLocaleString()} tok/s` : "–"}</span></div>
           <div><span className="stat-label">{cards.length > 1 ? "GPU memory (peak, per card)" : "GPU memory (peak)"}</span><span className="stat-value">{st.peak_mem_gb ? `${st.peak_mem_gb} GB` : "–"}</span></div>
+          <MoreStats status={st} />
         </div>
 
         {judge && (ACTIVE.has(st.state) || judge.state === "failed") && (
@@ -481,6 +495,8 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
             series={[
               { label: "each logged step", points: train.map((m) => ({ x: m.step, y: Number(m.loss) })), tone: "muted" },
               { label: "smoothed", points: smooth(train.map((m) => ({ x: m.step, y: Number(m.loss) }))), tone: "accent" },
+              // The validation loss on the same axis: the gap between the two is overfitting.
+              { label: "validation", points: evals.filter((m) => typeof m.val_loss === "number").map((m) => ({ x: m.step, y: Number(m.val_loss) })), tone: "ok" },
             ]} />
         </Section>
         <Section title={metric === "val_loss" ? "Validation loss" : `Validation: ${METRIC_LABEL[metric] ?? metric}`}>
@@ -493,6 +509,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
             }]} />
         </Section>
       </div>
+      <TrainingCharts train={train} head={!!st.head_m} hyper={cfg.hyper} />
 
       {test && (
         <Section title="Final test">
@@ -502,7 +519,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
                  ["Accuracy", test.accuracy], ["Mean AUROC", test.auroc],
                  [`Catch rate at ${allowed} false alarms`, test.catch_rate], ["False alarms", test.false_alarms],
                  ["Mean macro-F1", test.macro_f1], ["Mean absolute error", test.mae], ["Calibration error", test.ece]]
-              : [["Test loss", test.val_loss], ["Perplexity", test.perplexity]]
+              : [["Test loss", test.val_loss], ["Perplexity", test.perplexity], ["Token accuracy", test.token_accuracy]]
             ).filter(([, v]) => typeof v === "number").map(([label, v]) => (
               <div key={label as string}>
                 <span className="stat-label">{label as string}</span>
@@ -521,6 +538,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
       {scored.length > 0 && (
         <QuestionScores checks={scored} preferred={preferred} falseAlarmPercent={cfg.checkpoints.falseAlarmPercent ?? 1} />
       )}
+      {sampled.length > 0 && <Samples checks={sampled} preferred={preferred} />}
 
       {evals.length > 0 && (
         <Section title="Validation checks">
