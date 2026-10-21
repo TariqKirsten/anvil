@@ -38,6 +38,15 @@ def test_each_question_is_scored_by_its_type():
     assert tasks.decision_metrics(out, 4, 0.0)["questions"]["flag"]["catch_rate"] == 0.5  # no false alarm allowed
 
 
+def test_each_question_has_its_own_loss_and_together_they_make_the_validation_loss():
+    out = {"loss": [0.2, 0.4, 1.0, 2.0], "correct": [True] * 4, "confidence": [0.9] * 4,
+           "questions": {("flag", "noul"): {"yes": [0.9, 0.2], "gold": [True, False], "loss": [0.2, 0.4]},
+                         ("kind", "choice"): {"picked": ["a", "b"], "gold": ["a", "a"], "loss": [1.0, 2.0]}}}
+    m = tasks.decision_metrics(out, 4, 0.01)
+    assert (m["questions"]["flag"]["loss"], m["questions"]["kind"]["loss"]) == (pytest.approx(0.3), pytest.approx(1.5))
+    assert m["val_loss"] == pytest.approx((0.3 * 2 + 1.5 * 2) / 4)  # each question's, weighted by the rows asking it
+
+
 def test_a_question_with_one_answer_only_has_no_auroc():
     m = tasks.decision_metrics(answers(flag={"type": "noul", "yes": [0.9, 0.7], "gold": [True, True]}), 2, 0.01)
     assert m["questions"]["flag"] == {"type": "noul", "rows": 2, "answers": {"yes": 2, "no": 0}}

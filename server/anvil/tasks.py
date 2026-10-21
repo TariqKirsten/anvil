@@ -213,6 +213,11 @@ class DecisionLetters(Decisions, NoHead):
                                                + len(json.dumps(parsed["questions"][it.row][it.name]))) // 3.5 + 8)
                          for it in items])
 
+    @staticmethod
+    def kind(item: Item, parsed: dict) -> str:
+        """What the trained-rows check matches validation on (anvil.train.trained_rows): the question asked."""
+        return item.name
+
     def _encode(self, state: str, question: dict, name: str, order: list[int]) -> tuple[list[int], bool]:
         """The prompt's token ids, and whether the state had to be cut to fit max length."""
         opts = options(question)
@@ -301,19 +306,20 @@ class DecisionLetters(Decisions, NoHead):
             targets = self.collate(chunk, parsed, shuffle=False)
             valid, targets = targets["valid"], targets["targets"]
             logp = torch.log(probs.clamp_min(1e-9)).masked_fill(~valid, 0.0)
-            losses += (-(targets * logp).sum(-1)).tolist()
+            chunk_losses = (-(targets * logp).sum(-1)).tolist()
+            losses += chunk_losses
             picked = probs.masked_fill(~valid, -1)
             correct += (picked.argmax(-1) == targets.argmax(-1)).tolist()
             confidence += picked.max(-1).values.tolist()
-            for it, p, t, k in zip(chunk, probs, targets, picked.argmax(-1).tolist()):
+            for it, p, t, k, loss in zip(chunk, probs, targets, picked.argmax(-1).tolist(), chunk_losses):
                 question = parsed["questions"][it.row][it.name]
                 opts, gold = options(question), int(t.argmax())
                 if question["type"] == "noul":  # option 0 is "yes" in the question's own order
-                    note(questions, it.name, "noul", yes=float(p[0]), gold=bool(t[0] >= 0.5))
+                    note(questions, it.name, "noul", yes=float(p[0]), gold=bool(t[0] >= 0.5), loss=loss)
                 elif question["type"] == "choice":
-                    note(questions, it.name, "choice", picked=str(opts[k][0]), gold=str(opts[gold][0]))
+                    note(questions, it.name, "choice", picked=str(opts[k][0]), gold=str(opts[gold][0]), loss=loss)
                 else:  # a score's options are its levels, in order
-                    note(questions, it.name, "score", picked=k, gold=gold, levels=len(opts))
+                    note(questions, it.name, "score", picked=k, gold=gold, levels=len(opts), loss=loss)
         return {"loss": losses, "correct": correct, "confidence": confidence, "questions": questions}
 
 
@@ -322,7 +328,8 @@ def decision_metrics(out: dict, rows: int, false_alarm_rate: float) -> dict:
     Over all questions: val_loss, accuracy, and ece (calibration error: how far "80% sure" is from being right 80% of
     the time; lower is better).
 
-    Each question by its type, in "questions", with how many rows asked it and how often each answer was the gold one:
+    Each question by its type, in "questions", with how many rows asked it, how often each answer was the gold one, and
+    its own loss (the questions' losses, weighted by how many rows asked each, make val_loss):
     - yes/no: auroc; catch_rate, the share of yes caught when at most false_alarm_rate of the no cases are flagged; and
       false_alarms, the share of no cases flagged at a 0.5 cut-off
     - choice: accuracy, and macro_f1 (F1 per answer, averaged, so a rare answer counts as much as a common one)
@@ -381,6 +388,8 @@ def _decision_scores(out: dict, false_alarm_rate: float) -> dict:
     for (name, kind), answers in sorted(out["questions"].items()):
         label = name if types_of[name] == 1 else f"{name} ({kind})"
         scored[label], value = SCORE_BY_TYPE[kind](answers, false_alarm_rate)
+        if "loss" in answers:  # outputs from before each answer kept its loss have none
+            scored[label]["loss"] = float(np.mean(answers["loss"]))
         if value is not None:
             quality.append(value)
     for kind, key in (("noul", "auroc"), ("noul", "catch_rate"), ("noul", "false_alarms"), ("choice", "macro_f1"),
@@ -500,6 +509,11 @@ class LanguageModel(NoHead):
         columns = {"chat": ["messages"], "pairs": ["prompt", "completion"], "text": ["text"]}[self.fmt]
         parsed = {c: [(_value(v) if c == "messages" else v) for v in df[c]] for c in columns}
         return list(range(len(df))), parsed
+
+    @staticmethod
+    def kind(item: int, parsed: dict) -> str:
+        """What the trained-rows check matches validation on: rows are all one kind."""
+        return ""
 
     def lengths(self, items: list[int], parsed: dict) -> np.ndarray:
         def chars(i):
@@ -774,6 +788,11 @@ class DecisionClef(Decisions):
             if len(seen) >= 2000:
                 return
 
+    @staticmethod
+    def kind(item: int, parsed: dict) -> str:
+        """What the trained-rows check matches validation on: the questions a row asks."""
+        return ",".join(sorted(parsed["questions"][item]))
+
     def lengths(self, items: list[int], parsed: dict) -> np.ndarray:
         """Rough token counts (about 3.5 characters per token), only used to group similar lengths in a batch."""
         return np.array([min(self.max_length, (len(self.clef.render(parsed["state"][i]))
@@ -830,18 +849,20 @@ class DecisionClef(Decisions):
             for record, record_logits, record_targets in zip(batch["records"], logits, batch["targets"]):
                 for question, scores, t in zip(record.questions, record_logits, record_targets):
                     p = torch.softmax(scores.float(), dim=-1).cpu()
-                    losses.append(float(-(t * torch.log(p.clamp_min(1e-9))).sum()))
+                    loss = float(-(t * torch.log(p.clamp_min(1e-9))).sum())
+                    losses.append(loss)
                     correct.append(bool(p.argmax() == t.argmax()))
                     confidence.append(float(p.max()))
                     kind, ids = kinds[question.question_type], question.option_ids
                     k, gold = int(p.argmax()), int(t.argmax())
                     if kind == "noul":  # option 0 is "true"
-                        note(questions, question.question_id, kind, yes=float(p[0]), gold=bool(t[0] >= 0.5))
+                        note(questions, question.question_id, kind, yes=float(p[0]), gold=bool(t[0] >= 0.5),
+                             loss=loss)
                     elif kind == "choice":
-                        note(questions, question.question_id, kind, picked=ids[k], gold=ids[gold])
+                        note(questions, question.question_id, kind, picked=ids[k], gold=ids[gold], loss=loss)
                     else:  # a score's options are its levels, "0", "1", ...
                         note(questions, question.question_id, kind, picked=int(ids[k]), gold=int(ids[gold]),
-                             levels=len(ids))
+                             levels=len(ids), loss=loss)
         return {"loss": losses, "correct": correct, "confidence": confidence, "questions": questions}
 
     def metrics(self, out: dict, rows: int) -> dict:

@@ -2,6 +2,7 @@
 
 import json
 import os
+import random
 import shutil
 import signal
 import subprocess
@@ -13,7 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from anvil import config, runs, supervisor, tasks
+from anvil import config, runs, supervisor, tasks, train
 
 SERVER = Path(__file__).resolve().parents[1]
 LETTER_LINE = " ".join(f"{c}." for c in tasks.LETTERS) + " " + " ".join(tasks.LETTERS)
@@ -154,6 +155,13 @@ def test_a_decision_run_trains_checkpoints_and_saves(tmp_path, tiny_model):
     assert [m["step"] for m in evals] == [0, 3, 6]
     assert {"val_loss", "accuracy", "auroc", "macro_f1", "overall"} <= set(evals[-1])
     assert {name: q["type"] for name, q in evals[-1]["questions"].items()} == {"rude": "noul", "kind": "choice"}
+    assert all(np.isfinite(q["loss"]) for q in evals[-1]["questions"].values())
+    # half of validation's 12 rude and 4 kind questions, re-scored at every check once training has learned from them
+    plan = json.loads((run_dir / "trained_rows.json").read_text())
+    assert len(plan["items"]) == 6 + 2 and 1 <= plan["from"] <= 6
+    assert [m["step"] for m in evals if "trained" in m] == [s for s in (0, 3, 6) if s >= plan["from"]]
+    assert evals[-1]["trained"]["rows"] == 8 and set(evals[-1]["trained"]["questions"]) == {"rude", "kind"}
+    assert set(status["final_test"]["trained"]["questions"]) == {"rude", "kind"}
     assert all(np.isfinite(m["loss"]) for m in lines if m["type"] == "train")
     assert sorted(p.name for p in (run_dir / "checkpoints").iterdir()) == ["step-0000003", "step-0000006"]
     assert (run_dir / "model" / "adapter" / "adapter_config.json").exists()
@@ -810,9 +818,30 @@ def test_a_judge_process_checks_every_checkpoint(tmp_path, tiny_model):
     assert status["state"] == "done"
     by_judge = sorted(m["step"] for m in metrics(run_dir) if m["type"] == "eval" and m.get("by") == "judge")
     assert by_judge == [0, 2, 4, 6]
+    start_step = json.loads((run_dir / "trained_rows.json").read_text())["from"]
+    assert [m["step"] for m in metrics(run_dir) if m["type"] == "eval" and "trained" in m] == \
+        [s for s in (0, 2, 4, 6) if s >= start_step]
     assert not [m for m in metrics(run_dir) if m["type"] == "eval" and m.get("by") == "trainer"]
     assert json.loads((run_dir / "judge" / "status.json").read_text())["state"] == "done"
     assert status["final_test"]["step"] == json.loads((run_dir / "leaderboard.json").read_text())["best_step"]
+
+
+def test_the_trained_rows_are_the_first_training_learns_from_as_validation_mixes_them():
+    class Task:  # an item is (row, kind)
+        @staticmethod
+        def kind(item, parsed):
+            return item[1]
+
+    items = [(i, "b" if i % 3 == 0 else "a") for i in range(60)]
+    val = [(0, "a")] * 8 + [(0, "b")] * 2
+    lengths = np.ones(len(items))
+    picked, since = train.trained_rows(Task(), items, {}, lengths, val, {}, per_batch=4, accum=2, seed=1)
+    batches = tasks.length_grouped_batches(lengths, 4, random.Random(1))  # the first epoch's batches, as training makes
+    order = [i for batch in batches for i in batch]
+    first = {kind: [i for i in order if items[i][1] == kind] for kind in "ab"}
+    assert sorted(picked) == sorted(first["a"][:4] + first["b"][:1])  # half of validation's 8 a and 2 b
+    last = max(next(n for n, batch in enumerate(batches) if i in batch) for i in picked)
+    assert since == last // 2 + 1  # two batches a step: training has learned from all of them by this step
 
 
 def test_picking_rules():

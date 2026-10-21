@@ -214,6 +214,9 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   // One row per step: if a step was ever checked twice (the judge died mid-check), the later check counts.
   const evals = [...new Map(run.metrics.filter((m) => m.type === "eval").map((m) => [m.step, m])).values()]
     .sort((a, b) => a.step - b.step);
+  // The loss on rows the model trained on early in its first epoch, re-checked at every check once it has learned from
+  // them all and mixed like the validation rows: well below the validation loss means it memorised them.
+  const trainedLoss = (m: RunMetric) => m.trained?.loss;
   const board = run.leaderboard;
   const best = board.best_step ?? st.best_step ?? null;
   const metric = board.entries.at(-1)?.metric ?? PICK_METRIC[cfg.checkpoints.pickBy] ?? "val_loss";
@@ -249,6 +252,8 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   const mixed = (scores: Record<string, unknown>[]) =>
     TYPE_MEANS.filter((k) => scores.some((m) => typeof m[k] === "number")).length > 1;
   const columns: [string, string, string][] = [["val_loss", "Val loss", "Validation loss"]];
+  if (evals.some((m) => typeof trainedLoss(m) === "number"))
+    columns.push(["trained_loss", "Trained rows", "Loss on rows the model trained on early in its first epoch, mixed like the validation rows: well below the validation loss means it memorised them"]);
   if (decision) {
     columns.push(["accuracy", "Accuracy", "Share of questions answered right"]);
     if (mixed(evals) || metric === "overall")
@@ -458,8 +463,10 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           series={[
             { label: "each logged step", points: train.map((m) => ({ x: m.step, y: Number(m.loss) })), tone: "muted" },
             { label: "smoothed", points: smooth(train.map((m) => ({ x: m.step, y: Number(m.loss) }))), tone: "accent" },
-            // The validation loss on the same axis: the gap between the two is overfitting.
+            // The validation loss on the same axis, and the loss on rows it trained on, re-checked at every check and
+            // mixed like validation: the gap between those two is memorising (By question says which questions).
             { label: "validation", points: evals.filter((m) => typeof m.val_loss === "number").map((m) => ({ x: m.step, y: Number(m.val_loss) })), tone: "ok" },
+            { label: "trained rows", points: evals.filter((m) => typeof trainedLoss(m) === "number").map((m) => ({ x: m.step, y: trainedLoss(m)! })), tone: "warn" },
           ]} />
         <ChartSection title={metric === "val_loss" ? "Validation loss" : `Validation: ${METRIC_LABEL[metric] ?? metric}`}
           empty="Validation runs before training starts and at every checkpoint."
@@ -479,8 +486,10 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
               ? [...(mixed([test]) || metric === "overall" ? [["Overall", test.overall]] : []),
                  ["Accuracy", test.accuracy], ["Mean AUROC", test.auroc],
                  [`Catch rate at ${allowed} false alarms`, test.catch_rate], ["False alarms", test.false_alarms],
-                 ["Mean macro-F1", test.macro_f1], ["Mean absolute error", test.mae], ["Calibration error", test.ece]]
-              : [["Test loss", test.val_loss], ["Perplexity", test.perplexity], ["Token accuracy", test.token_accuracy]]
+                 ["Mean macro-F1", test.macro_f1], ["Mean absolute error", test.mae], ["Calibration error", test.ece],
+                 ...(test.trained ? [["Test loss", test.val_loss], ["Loss on trained rows", test.trained.loss]] : [])]
+              : [["Test loss", test.val_loss], ["Loss on trained rows", test.trained?.loss], ["Perplexity", test.perplexity],
+                 ["Token accuracy", test.token_accuracy]]
             ).filter(([, v]) => typeof v === "number").map(([label, v]) => (
               <div key={label as string}>
                 <span className="stat-label">{label as string}</span>
@@ -492,6 +501,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
             The step {test.step.toLocaleString()} checkpoint on {test.rows?.toLocaleString()}{" "}
             {decision ? "questions" : "rows"} from the test set. The test set played no part in picking it, so this is
             the fair number to quote.{decision && " Each question's scores are under By question."}
+            {test.trained && ` Loss on trained rows: the same checkpoint on ${test.trained.rows.toLocaleString()} rows it trained on early in its first epoch; well below the test loss means it memorised them${decision ? ", and By question says which questions" : ""}.`}
           </p>
         </Section>
       )}
@@ -522,7 +532,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
                     </td>
                     {columns.map(([key]) => (
                       <td key={key} className={key === metric ? "picked" : undefined}>
-                        {num(m[key], key === "perplexity" ? 2 : 3)}
+                        {num(key === "trained_loss" ? trainedLoss(m) : m[key], key === "perplexity" ? 2 : 3)}
                         {key === metric && typeof m.se?.[key] === "number" && <span className="se"> ±{num(m.se[key])}</span>}
                       </td>
                     ))}

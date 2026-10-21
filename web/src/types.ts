@@ -131,12 +131,13 @@ export interface PrepareJob {
 export type QuestionType = "noul" | "choice" | "score";
 
 // One question's scores at a check (server/anvil/tasks.py, decision_metrics). answers: how often each answer was the
-// gold one ("yes" and "no", a choice's keys, a score's levels). Runs from before these were kept have AUROC, catch
-// rate and false alarms only.
+// gold one ("yes" and "no", a choice's keys, a score's levels); loss: its own share of the check's loss. Runs from
+// before these were kept have AUROC, catch rate and false alarms only.
 export interface QuestionScore {
   type: QuestionType;
   rows?: number;
   answers?: Record<string, number>;
+  loss?: number;
   auroc?: number;
   catch_rate?: number;
   false_alarms?: number;
@@ -155,13 +156,25 @@ export interface Sample {
   tokens: number;
 }
 
+// The trained-rows check (server/anvil/train.py, trained_rows): the same model scored at the same check on rows it
+// trained on early in its first epoch, mixed like the validation rows, so the two losses compare overall and question
+// by question. Checks before training had learned from all of them, and runs from before it, have none.
+export interface TrainedScores {
+  rows: number;
+  loss: number;
+  questions?: Record<string, { loss: number }>;
+}
+
 // A check's scores: numbers by name, each question's own under "questions", one standard error of each score under
-// "se" (from a bootstrap over the validation sample's rows), and a language model's sample replies.
+// "se" (from a bootstrap over the validation sample's rows), the trained-rows check, and a language model's sample
+// replies.
 export type Scores = {
-  [key: string]: number | string | Record<string, QuestionScore> | Record<string, number> | Sample[] | undefined;
+  [key: string]: number | string | Record<string, QuestionScore> | Record<string, number> | TrainedScores | Sample[]
+    | undefined;
 } & {
   questions?: Record<string, QuestionScore>;
   se?: Record<string, number>;
+  trained?: TrainedScores;
   samples?: Sample[];
 };
 

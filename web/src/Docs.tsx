@@ -323,6 +323,17 @@ export function Docs({ part, onLogout }: { part: string | null; onLogout: () => 
             <strong>The test score is fair whatever you pick.</strong> The test set is used once, at the end, on the
             picked checkpoint, so it plays no part in picking.
           </li>
+          <li id="trained-rows">
+            <strong>Trained rows show memorising.</strong> Every check also scores the model on rows it trained on early
+            in its first epoch, mixed like the validation rows, and the final test does the same with the picked
+            checkpoint. Similar losses on the two mean what it learned carries over to new rows; a much lower loss on
+            the trained rows means it learned those rows rather than the pattern, and more training won't fix that. By
+            question marks a question in amber when its loss here is at least 0.1 higher and 1.5 times its loss on the
+            trained rows. One example: a question whose labels come from a few templates can be near perfect on the
+            trained rows and poor on rows made from templates it never saw. The two losses only compare like this
+            question by question and in the same mix; the training loss on the chart is averaged over training's own
+            mix of questions, so it can sit far below the validation loss without any memorising.
+          </li>
           <li>
             <strong>You can change your mind, within limits.</strong> The run page shows every score at every check,
             and Export as GGUF offers any kept checkpoint. Keep best keeps the top checkpoints by the score you picked

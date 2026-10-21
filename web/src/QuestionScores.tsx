@@ -1,5 +1,6 @@
 // Each question's scores at one check, or at the final test: a table per question type, one row per question, with
-// how many rows asked it and how often each answer came up, so a score that rests on a handful of cases shows.
+// how many rows asked it and how often each answer came up, so a score that rests on a handful of cases shows. Next to
+// each question's loss, its loss on rows the model trained on, which shows a question it has memorised.
 
 import { useState } from "react";
 import type { QuestionScore, QuestionType, Scores } from "./types";
@@ -45,6 +46,12 @@ function spread(answers: Record<string, number> | undefined) {
   return answers ? Object.entries(answers).map(([answer, n]) => `${answer}: ${n.toLocaleString()}`).join(" · ") : "–";
 }
 
+// Far better on rows it trained on than on new ones: the model learned those rows rather than something that carries
+// over (Docs, "Trained rows").
+export function memorising(here: number | undefined, trained: number | undefined) {
+  return typeof here === "number" && typeof trained === "number" && here - trained >= 0.1 && here >= 1.5 * trained;
+}
+
 function fewest(answers: Record<string, number> | undefined) {
   const counts = Object.values(answers ?? {});
   return counts.length ? Math.min(...counts) : undefined;
@@ -67,6 +74,11 @@ export function QuestionScores({ checks, preferred, falseAlarmPercent }: {
   const names = Object.keys(questions).sort();
   const of = (type: QuestionType) => names.filter((n) => questions[n].type === type);
   const types = GROUPS.filter((g) => of(g.type).length > 0).map((g) => g.type);
+  const loss = typeof shown.scores.val_loss === "number" ? shown.scores.val_loss : undefined;
+  const hasLoss = names.some((n) => typeof questions[n].loss === "number");
+  const trained = shown.scores.trained;
+  const fit = (name: string) => trained?.questions?.[name]?.loss;
+  const memorised = names.filter((n) => memorising(questions[n].loss, fit(n)));
 
   return (
     <Section title="By question">
@@ -81,6 +93,15 @@ export function QuestionScores({ checks, preferred, falseAlarmPercent }: {
           </select>
         </Field>
       </div>
+      {trained && (
+        <p className={memorised.length ? "warn-text" : "hint"}>
+          {memorised.length
+            ? `Memorising: ${memorised.join(", ")} ${memorised.length === 1 ? "scores" : "score"} far better on rows the model trained on than here (in amber), so it learned those rows rather than something that carries over to new ones.`
+            : "No question scores much better on rows the model trained on than here, so what it learned carries over."}{" "}
+          On {trained.rows.toLocaleString()} rows it trained on early in its first epoch, mixed like these, its loss is{" "}
+          {num(trained.loss)}; here it's {num(loss)}.
+        </p>
+      )}
 
       {GROUPS.filter((g) => types.includes(g.type)).map((g) => (
         <div key={g.type} className="question-group">
@@ -101,6 +122,8 @@ export function QuestionScores({ checks, preferred, falseAlarmPercent }: {
                       Catch rate
                     </th>
                     <th title="Share of no cases flagged at 50%">False alarms</th>
+                    {hasLoss && <th title="The question's loss on these rows (lower is better)">Loss</th>}
+                    {trained && <th title="Its loss on rows the model trained on. Amber: far lower than here">On trained rows</th>}
                   </tr>
                 ) : (
                   <tr>
@@ -118,6 +141,8 @@ export function QuestionScores({ checks, preferred, falseAlarmPercent }: {
                     <th title={g.type === "choice" ? "Share answered right" : "Share at exactly the right level"}>
                       {g.type === "choice" ? "Accuracy" : "Exact"}
                     </th>
+                    {hasLoss && <th title="The question's loss on these rows (lower is better)">Loss</th>}
+                    {trained && <th title="Its loss on rows the model trained on. Amber: far lower than here">On trained rows</th>}
                   </tr>
                 )}
               </thead>
@@ -134,6 +159,8 @@ export function QuestionScores({ checks, preferred, falseAlarmPercent }: {
                         <td>{num(q.auroc)}</td>
                         <td>{num(q.catch_rate)}</td>
                         <td>{num(q.false_alarms)}</td>
+                        {hasLoss && <td>{num(q.loss)}</td>}
+                        {trained && <td className={memorising(q.loss, fit(name)) ? "memorising" : undefined}>{num(fit(name))}</td>}
                       </tr>
                     );
                   const rarest = fewest(q.answers);
@@ -145,6 +172,8 @@ export function QuestionScores({ checks, preferred, falseAlarmPercent }: {
                       <td className={few(rarest)}>{whole(rarest)}</td>
                       <td>{num(g.type === "choice" ? q.macro_f1 : q.mae)}</td>
                       <td>{num(q.accuracy)}</td>
+                      {hasLoss && <td>{num(q.loss)}</td>}
+                      {trained && <td className={memorising(q.loss, fit(name)) ? "memorising" : undefined}>{num(fit(name))}</td>}
                     </tr>
                   );
                 })}
@@ -155,11 +184,13 @@ export function QuestionScores({ checks, preferred, falseAlarmPercent }: {
       ))}
 
       <p className="hint">
-        Numbers in amber: an answer that came up fewer than {FEW} times, so the scores beside it can swing a lot from
+        A count in amber: an answer that came up fewer than {FEW} times, so the scores beside it can swing a lot from
         one check to the next.
         {types.includes("noul") && ` AUROC: how well yes cases rank above no cases (0.5 is chance, 1 perfect). Catch rate: the share of yes cases caught when at most ${falseAlarmPercent}% of no cases may be flagged. False alarms: the share of no cases flagged at 50%.`}
         {types.includes("choice") && " Macro-F1: the F1 score of each answer, averaged, so a rare answer counts as much as a common one."}
         {types.includes("score") && " MAE: how many levels off the answer is, on average (lower is better); Exact: the share at exactly the right level."}
+        {hasLoss && " Loss: the question's own part of the loss (lower is better)."}
+        {trained && " On trained rows: its loss on rows the model trained on early in its first epoch, in amber where that's far lower than here."}
       </p>
     </Section>
   );

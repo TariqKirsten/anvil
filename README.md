@@ -66,7 +66,7 @@ same settings again is instant.
 **Start training** checks the whole form, then starts a separate trainer process. The run gets its own page (Runs,
 top left) with progress (steps and epochs), speed, time left, GPU memory, the gradient norm, the tokens trained on, the
 padding and the rows cut by max length, the loss and validation charts (the validation loss on the training chart too,
-so the gap between them shows), the gradient norm and learning rate charts (a click on any chart opens it bigger, and
+with the loss on trained rows, below), the gradient norm and learning rate charts (a click on any chart opens it bigger, and
 it follows the run live there too), a table of every validation check (newest first, in a box of its own that
 scrolls), the final test, the checkpoints and the log. A language model's page also has sample replies: at every
 check the model answers the same three validation prompts, shown next to the replies the data gives.
@@ -142,6 +142,13 @@ check the model answers the same three validation prompts, shown next to the rep
   to the computer's own memory: test it with memtest86+.
 - The finished model is in the run's folder: `model/adapter` and `model/merged` (for LoRA), or `model/merged`. Its
   `anvil.json` says which checkpoint it is and what it scored on the test set.
+- **Trained rows** show whether the model learned the pattern or just its training rows. Every check also scores rows
+  the model trained on early in its first epoch, as many of each kind as validation has, halved (a decision question,
+  or a Clef row's set of questions), so a check takes about 1.5 times as long; the final test does the same with the
+  picked checkpoint. Their loss shows on the training chart, in the checks table and, per question, under By question,
+  which marks a question in amber when its loss on new rows is at least 0.1 higher and 1.5 times its loss on the
+  trained rows: the model has memorised it, and more training won't help. The rows are the first training learns
+  from, listed in the run's `trained_rows.json`, and checks before training has learned from all of them skip it.
 - **Delete** (on the page of a run that has finished, failed or stopped) removes the run for good: checkpoints, the
   finished model, metrics and the log. It says how much space that frees and asks first. A run that's still training,
   whose judge is still checking, or that's being exported or uploaded can't be deleted.

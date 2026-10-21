@@ -44,10 +44,27 @@ def run(cfg: dict, run_dir: Path, report: train.Reporter) -> None:
     task = train.make_task(cfg, tok, model, device)
     val_items, val_parsed = task.items(train.read_split(cfg, "validation", train.VAL_ROWS))
     batch = max(1, int(h["batchSize"]) * 2)
+    trained: dict = {}  # the trainer's trained-rows check (its trained_rows.json), read the first time a check needs it
+
+    def trained_check(step: int) -> dict | None:
+        if not trained:
+            path = run_dir / "trained_rows.json"
+            plan = json.loads(path.read_text()) if path.exists() else None
+            if plan is None or step < plan["from"]:
+                return None
+            items, parsed = task.items(train.read_split(cfg, "train", None))
+            trained.update(rows=[items[i] for i in plan["items"]], parsed=parsed, start=plan["from"])
+        if step < trained["start"]:
+            return None
+        return train.trained_scores(task.evaluate(model, trained["rows"], trained["parsed"], batch, autocast))
+
     def score(step: int) -> None:
         report.update(state="checking", stage=f"Checking step {step}", step=step)
         model.eval()
         metrics = task.evaluate(model, val_items, val_parsed, batch, autocast)
+        fit = trained_check(step)
+        if fit:
+            metrics["trained"] = fit
         metrics = train.with_samples(metrics, task.samples(model, val_items, val_parsed, autocast))
         report.metric({"type": "eval", "step": step, "by": "judge", **metrics})
         with picking.updating(run_dir) as board:

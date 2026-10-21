@@ -33,6 +33,7 @@ import signal
 import sys
 import time
 import traceback
+from collections import Counter
 from pathlib import Path
 
 from . import optim, picking
@@ -43,6 +44,7 @@ if os.environ.get("ANVIL_SAFE_KERNELS") == "1":
     sys.modules["causal_conv1d"] = None
 
 VAL_ROWS = 2000  # validation checks use at most this many rows, so they take seconds, not minutes
+TRAINED_SHARE = 0.5  # the trained-rows check scores this share of validation's count (a check takes about 1.5x)
 TEST_ROWS = 5000  # the final test uses at most this many rows (about two minutes for a 2B decision model)
 JUDGE_SILENT_S = 90  # a judge that hasn't reported for this long is taken to be gone
 HEAD_LR = 1e-4  # Clef's head, unless the form says otherwise
@@ -276,6 +278,41 @@ def read_split(cfg: dict, name: str, cap: int | None):
     return df
 
 
+def trained_rows(task, items: list, parsed: dict, lengths, val_items: list, val_parsed: dict, per_batch: int,
+                 accum: int, seed: int) -> tuple[list[int], int]:
+    """The training rows the trained-rows check scores at every check, next to validation: the first ones training
+    learns from (the first epoch's order), as many of each kind as validation has, times TRAINED_SHARE. A kind is the
+    question a decision item asks, or the set of questions a Clef row asks, so the two losses compare question by
+    question and overall; a language model's rows are all one kind. A model that scores far better on these than on
+    validation has learned its training rows rather than something that carries over to new ones.
+
+    Returns indices into items, and the step from which training has learned from every one of them."""
+    from . import tasks
+
+    want = Counter(task.kind(v, val_parsed) for v in val_items)
+    want = {kind: max(1, round(n * TRAINED_SHARE)) for kind, n in want.items()}
+    picked, last = [], 0
+    for b, batch in enumerate(tasks.length_grouped_batches(lengths, per_batch, random.Random(seed))):
+        for i in batch:
+            kind = task.kind(items[i], parsed)
+            if want.get(kind, 0) > 0:
+                want[kind] -= 1
+                picked.append(i)
+                last = b
+        if not any(want.values()):
+            break
+    return picked, last // accum + 1
+
+
+def trained_scores(metrics: dict) -> dict:
+    """What the run page shows of a trained-rows check: its loss overall and each question's."""
+    out = {"rows": metrics["rows"], "loss": metrics["val_loss"]}
+    questions = {name: {"loss": q["loss"]} for name, q in (metrics.get("questions") or {}).items() if "loss" in q}
+    if questions:
+        out["questions"] = questions
+    return out
+
+
 # ---------------------------------------------------------------- checkpoints
 
 def checkpoints(run_dir: Path) -> list[Path]:
@@ -389,6 +426,9 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     per_batch = per_card * shares  # one batch is split into its shares: each takes batch size rows of it
     batches_per_epoch = math.ceil(len(items) / per_batch)
     steps_per_epoch = max(1, math.ceil(batches_per_epoch / accum))
+    trained, trained_from = trained_rows(task, items, parsed, lengths, val_items, val_parsed, per_batch, accum, seed)
+    if group.main:  # the judge scores the same rows (judge.py)
+        write_json(run_dir / "trained_rows.json", {"items": trained, "from": trained_from})
     total = int(h.get("maxSteps") or 0) or steps_per_epoch * int(h["epochs"])
     # Given a new length on Resume (anvil.runs.resume), a run keeps the start its schedule was laid out with, for the
     # length it had then: the same warmup, and a new Clef head's steps alone. Only the end of the schedule moves.
@@ -477,8 +517,8 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
         cards += f", each taking {len(my_shares)} of every batch's {shares} shares in turn"
     say(f"{len(items):,} training items, {len(val_items):,} validation items; {total:,} steps "
         f"({steps_per_epoch:,} per epoch, {per_batch * accum:,} items per step); training {n_trainable / 1e6:.1f}M "
-        f"of {n_all / 1e9:.2f}B parameters on {cards}; checks {'on the judge GPU' if judged_elsewhere else 'here'}",
-        flush=True)
+        f"of {n_all / 1e9:.2f}B parameters on {cards}; checks {'on the judge GPU' if judged_elsewhere else 'here'}, "
+        f"each also on {len(trained):,} training items from step {trained_from:,}", flush=True)
     def training() -> str:
         return "Training the head alone" if step < head_first else "Training"
 
@@ -496,6 +536,10 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
         model.eval()
         out = task.outputs(model, val_items[group.rank::world], val_parsed, max(1, per_card * 2), autocast)
         metrics = task.metrics(task.combine(group.gather(out)), len(val_items))
+        if trained and at_step >= trained_from:  # the same on every card, which all take part
+            rows = [items[i] for i in trained]
+            out = task.outputs(model, rows[group.rank::world], parsed, max(1, per_card * 2), autocast)
+            metrics["trained"] = trained_scores(task.metrics(task.combine(group.gather(out)), len(rows)))
         if group.main:  # a language model's sample replies, generated here while the other cards wait
             metrics = with_samples(metrics, task.samples(model, val_items, val_parsed, autocast))
         model.train()
@@ -680,13 +724,14 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
 
     group.end(wait=True)  # every card stops at the same step; from here on process 0 works alone
     if group.main:
-        finish(cfg, run_dir, report, model, tok, task, step, early, board, device, dtype, autocast)
+        finish(cfg, run_dir, report, model, tok, task, step, early, board, device, dtype, autocast,
+               ([items[i] for i in trained], parsed, trained_from))
 
 
 def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, early: str | None, board: dict,
-           device, dtype, autocast) -> None:
-    """Training is over: make sure every checkpoint has been checked, pick the best, score it once on the test split,
-    and save it as the run's model."""
+           device, dtype, autocast, trained: tuple[list, dict, int] | None = None) -> None:
+    """Training is over: make sure every checkpoint has been checked, pick the best, score it once on the test split
+    (and on the trained-rows check's rows, so the two compare), and save it as the run's model."""
     ck, h = cfg["checkpoints"], cfg["hyper"]
     pick_by = ck.get("pickBy", "val_loss")
     lora = cfg["training_type"] == "lora"
@@ -730,6 +775,9 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
         test_items, test_parsed = task.items(test_df)
         model.eval()
         final_test = {"step": best, **task.evaluate(model, test_items, test_parsed, batch, autocast)}
+        rows, parsed, trained_from = trained or ([], {}, 0)
+        if rows and best >= trained_from:
+            final_test["trained"] = trained_scores(task.evaluate(model, rows, parsed, batch, autocast))
         final_test = with_samples(final_test, task.samples(model, test_items, test_parsed, autocast))
         report.metric({"type": "test", **final_test})
 

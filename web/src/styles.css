@@ -1370,6 +1370,10 @@ h1 {
   stroke: var(--warn);
 }
 
+.chart-warn circle {
+  fill: var(--warn);
+}
+
 .chart-muted polyline {
   stroke: var(--border-strong);
   stroke-width: 1.25;
@@ -1404,6 +1408,10 @@ h1 {
 
 .chart-key.chart-ok::before {
   background: var(--ok);
+}
+
+.chart-key.chart-warn::before {
+  background: var(--warn);
 }
 
 .chart-marker line {
@@ -2190,7 +2198,8 @@ button:disabled {
   font-weight: 400;
 }
 
-.table td.few {
+.table td.few,
+.table td.memorising {
   color: var(--warn);
   font-weight: 600;
 }
