@@ -431,11 +431,14 @@ SCORE_BY_TYPE = {"noul": _score_yes_no, "choice": _score_choice, "score": _score
 
 
 def macro_f1(picked: list, gold: list) -> float:
-    """F1 for each answer that was the gold one or was picked, averaged: each counts the same, however rare. F1 is
-    2·hits / (2·hits + wrongly picked + missed)."""
+    """F1 for each answer that is the gold one somewhere, averaged: each counts the same, however rare. F1 is
+    2·hits / (2·hits + wrongly picked + missed). An answer that's picked but never the gold one gets no F1 of its own:
+    its picks already count as misses of the answers they should have been. With an F1 of 0 of its own, one stray pick
+    of an answer the validation rows never have cost a whole answer's share (a quarter of a three-answer question's
+    score), so the score jumped between checks on a single row."""
     picked, gold = np.array(picked, dtype=object), np.array(gold, dtype=object)
     scores = []
-    for answer in set(gold.tolist()) | set(picked.tolist()):
+    for answer in set(gold.tolist()):
         hits = int(((picked == answer) & (gold == answer)).sum())
         wrong = int(((picked == answer) & (gold != answer)).sum())
         missed = int(((picked != answer) & (gold == answer)).sum())

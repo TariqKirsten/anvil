@@ -97,7 +97,8 @@ check the model answers the same three validation prompts, shown next to the rep
     they can be compared:
     - yes/no: AUROC, the catch rate (yes cases caught when at most 1% of no cases may be flagged; **False alarms
       allowed** under Checkpoints changes the 1%), and the false alarms at 50%;
-    - choice: accuracy and macro-F1 (F1 per answer, averaged, so a rare answer counts as much as a common one);
+    - choice: accuracy and macro-F1 (F1 per answer, averaged, so a rare answer counts as much as a common one; only
+      answers the rows really have count, so a stray pick of one they never have is a miss, not an answer scoring 0);
     - score: exact accuracy and the mean absolute error (how many levels off, on average).
   - Over all questions: loss, accuracy and calibration error, the averages of each type, and **Overall**: every
     question's own 0-to-1 score (AUROC, macro-F1, or 1 minus the absolute error over the levels' range), averaged.

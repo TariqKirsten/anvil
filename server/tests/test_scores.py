@@ -27,8 +27,9 @@ def test_each_question_is_scored_by_its_type():
     # 3 of the 4 (yes, no) pairs rank the yes higher; one of the two no cases may be flagged, so both yes are caught
     assert flag == {"type": "noul", "rows": 4, "answers": {"yes": 2, "no": 2}, "auroc": 0.75, "catch_rate": 1.0,
                     "false_alarms": 0.5}
-    # F1 per answer, 2·hits / (2·hits + wrongly picked + missed): a 2/3, b 1/2, c (picked once, never right) 0
-    assert kind["macro_f1"] == pytest.approx((2 / 3 + 1 / 2 + 0) / 3)
+    # F1 per gold answer, 2·hits / (2·hits + wrongly picked + missed): a 2/3, b 1/2. c is picked once but never the
+    # gold answer: that pick already counts as a miss of b, so c gets no F1 of its own
+    assert kind["macro_f1"] == pytest.approx((2 / 3 + 1 / 2) / 2)
     assert kind["accuracy"] == 0.5 and kind["answers"] == {"b": 3, "a": 1} and kind["rows"] == 4
     assert level == {"type": "score", "rows": 4, "answers": {"0": 2, "1": 1, "2": 1}, "accuracy": 0.5, "mae": 0.75}
     assert (m["auroc"], m["catch_rate"], m["macro_f1"], m["mae"]) == (0.75, 1.0, kind["macro_f1"], 0.75)

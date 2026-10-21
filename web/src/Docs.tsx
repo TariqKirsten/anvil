@@ -95,7 +95,9 @@ const SCORES: Score[] = [
       <>
         For each answer, F1 weighs how many of the model's picks of it were right against how many of the real ones it
         found. Macro-F1 averages that over the answers, so a rare answer counts as much as a common one. Averaged over
-        the choice questions (Macro-F1 on the run page).
+        the choice questions (Macro-F1 on the run page). Only answers the rows really have count: picking an answer
+        they never have is a miss of the right one, not an answer of its own scoring 0, so one stray pick can't take
+        a quarter off a three-answer question.
       </>
     ),
     training: (
