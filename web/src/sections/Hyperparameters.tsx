@@ -28,6 +28,10 @@ export function HyperSection({ form, update, errors, cards, trainItems }: Sectio
     : "passes over the training data";
   const cut = h.maxSteps && stepsPerEpoch ? `${percent(h.maxSteps, stepsPerEpoch)} of an epoch` : null;
   const lora = form.trainingType !== "full";
+  const lr = Number(h.learningRate);
+  const lrHint = !lora && lr > 5e-5 ? "High for full fine-tuning, where every weight moves: 1e-5 to 3e-5 is usual"
+    : clef && lr > 1e-4 ? "High for Clef: 5e-5 works, 2e-4 stopped it learning"
+    : clef ? "for the model; the head has its own below" : undefined;
   const setH = (change: Partial<Hyper>) => update((f) => ({ ...f, hyper: { ...f.hyper, ...change } }));
   const num = (key: keyof Hyper, label: string, step = 1, hint?: string) => (
     <Field id={key} label={label} error={errors[key]} hint={hint}>
@@ -39,10 +43,7 @@ export function HyperSection({ form, update, errors, cards, trainItems }: Sectio
   return (
     <Section title="Hyperparameters">
       <div className="grid-4">
-        <Field id="learningRate" label="Learning rate" error={errors.learningRate}
-          hint={!clef ? undefined : Number(h.learningRate) > 1e-4
-            ? "High for Clef: 5e-5 works, 2e-4 stopped it learning"
-            : "for the model; the head has its own below"}>
+        <Field id="learningRate" label="Learning rate" error={errors.learningRate} hint={lrHint}>
           <input id="learningRate" value={h.learningRate} aria-invalid={errors.learningRate ? true : undefined}
             onChange={(e) => setH({ learningRate: e.target.value })} />
         </Field>
@@ -92,12 +93,23 @@ export function HyperSection({ form, update, errors, cards, trainItems }: Sectio
             </select>
           </Field>
           {lora && num("loraAlpha", "LoRA alpha", 1, "usually 2 × rank")}
+          {!lora && (
+            <Field id="masterWeights" label="Weights while training"
+              hint={h.masterWeights === "fp32" ? "about twice the memory of bf16" : "updates rounded stochastically, so small ones add up"}>
+              <select id="masterWeights" value={h.masterWeights}
+                onChange={(e) => setH({ masterWeights: e.target.value as Hyper["masterWeights"] })}>
+                <option value="bf16">bf16</option>
+                <option value="fp32">fp32</option>
+              </select>
+            </Field>
+          )}
           {num("maxSteps", "Max steps", 1, cut ? `${cut}; 0 = all epochs` : "0 = all epochs; set it for quick test runs")}
         </div>
       ) : (
         <p className="hint">
           Warmup {h.warmupPercent}% · {h.scheduler} · weight decay {h.weightDecay} · max length {h.maxLength} ·{" "}
-          {h.precision} · seed {h.seed}{h.maxSteps ? ` · stops after ${h.maxSteps} steps${cut ? ` (${cut})` : ""}` : ""}
+          {h.precision} · seed {h.seed}{!lora && h.masterWeights === "fp32" ? " · fp32 weights" : ""}
+          {h.maxSteps ? ` · stops after ${h.maxSteps} steps${cut ? ` (${cut})` : ""}` : ""}
         </p>
       )}
     </Section>

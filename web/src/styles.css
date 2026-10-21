@@ -1381,7 +1381,8 @@ h1 {
 
 .chart-legend {
   display: flex;
-  gap: 14px;
+  flex-wrap: wrap; /* three keys don't fit a phone's width: a key goes to the next line whole */
+  gap: 2px 14px;
   margin-top: 4px;
   font-size: 12px;
   color: var(--text-2);
@@ -1806,6 +1807,13 @@ html:has(.chart-dialog[open]) {
 .table td.picked {
   background: var(--accent-bg);
   color: var(--accent-text);
+}
+
+/* One standard error of the picked score, beside it: small and quiet, since the score is what's read. */
+.table td .se {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .table .best-row td {
@@ -2363,4 +2371,53 @@ button:disabled {
     content: "→ ";
     color: var(--muted);
   }
+}
+
+/* ---- a language model's sample replies (Samples.tsx) */
+
+.samples {
+  display: grid;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.sample {
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+/* The model's reply and the data's side by side where there's room, one under the other on a phone. */
+.sample-pair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.sample-part {
+  min-width: 0;
+}
+
+.sample-label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+/* Replies are prose: wrapped, in the page's font, and a long one scrolls inside its box. */
+.sample pre {
+  max-height: 220px;
+  margin: 6px 0 0;
+  overflow: auto;
+  font: 13px/1.5 var(--font);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sample-prompt {
+  color: var(--text-2);
 }

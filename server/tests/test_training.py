@@ -238,13 +238,13 @@ def poison(monkeypatch, change) -> None:
 
     def make_task(*args):
         task = make(*args)
-        loss = task.loss
+        loss = task.loss_sum
 
         def changed(model, batch):
             calls[0] += 1
             return change(calls[0], loss(model, batch), model)
 
-        task.loss = changed
+        task.loss_sum = changed
         return task
 
     monkeypatch.setattr(train, "make_task", make_task)
@@ -295,7 +295,14 @@ def test_a_chat_run_learns_only_the_assistant(tmp_path, tiny_model):
     run_dir = make_run(tmp_path, run_config(tiny_model, data, train_as="lm", fmt="chat", maxSteps=3, every=3))
     status = finish(start(run_dir), run_dir)
     assert status["state"] == "done"
-    assert "perplexity" in [m for m in metrics(run_dir) if m["type"] == "eval"][-1]
+    evals = [m for m in metrics(run_dir) if m["type"] == "eval"]
+    assert {"perplexity", "token_accuracy", "samples"} <= set(evals[-1]) and 0 <= evals[-1]["token_accuracy"] <= 1
+    # Sample replies: the same three held-out prompts at every check, answered by the model as it is then.
+    assert [s["prompt"] for s in evals[-1]["samples"]] == [s["prompt"] for s in evals[0]["samples"]]
+    assert len(evals[-1]["samples"]) == 3 and evals[-1]["samples"][0]["prompt"] == "user: hello the"
+    assert set(evals[-1]["samples"][0]) == {"prompt", "expected", "reply", "ended", "tokens"}
+    assert evals[-1]["samples"][0]["expected"] == "thanks the" and 0 < evals[-1]["samples"][0]["tokens"] <= 96
+    assert "samples" not in status["last_eval"] and len(status["final_test"]["samples"]) == 3
 
 
 # ---------------------------------------------------------------- the pieces
@@ -324,6 +331,12 @@ def test_shuffled_options_keep_targets_in_step(tiny_model):
     assert (a["input_ids"] == b["input_ids"]).all() and (a["targets"] == b["targets"]).all()  # repeatable
     plain = task.collate(items, parsed, shuffle=False)
     assert (a["targets"].sum(-1) == 1).all() and not (a["input_ids"] == plain["input_ids"]).all()
+    later = task.collate(items, parsed, shuffle=True, salt=1)  # another epoch: other letters, targets still in step
+    assert not (later["input_ids"] == a["input_ids"]).all() and (later["targets"].sum(-1) == 1).all()
+    assert a["count"] == len(items) and a["padded"] == a["input_ids"].numel() >= a["tokens"] and a["truncated"] == 0
+    wordy = {"state": ["hello " * 100], "questions": [{"rude": {"type": "noul"}}], "gold": [{"rude": True}]}
+    cut = tasks.DecisionLetters(tok, 24, seed=3).collate([tasks.Item(0, "rude")], wordy, shuffle=False)
+    assert cut["truncated"] == 1 and cut["input_ids"].shape[1] < 100  # the state cut to fit (16 tokens at least)
 
 
 def test_chat_labels_cover_only_assistant_turns(tiny_model):
@@ -333,9 +346,131 @@ def test_chat_labels_cover_only_assistant_turns(tiny_model):
     task = tasks.LanguageModel(tok, "chat", 256)
     messages = [{"role": "user", "content": "hello world"}, {"role": "assistant", "content": "thanks"},
                 {"role": "user", "content": "please help"}, {"role": "assistant", "content": "fine"}]
-    ids, labels = task._chat(messages)
+    ids, labels, cut = task._chat(messages)
     learned = tok.decode([t for t, label in zip(ids, labels) if label != -100])
-    assert learned.replace(" ", "") == "thanks<|end|>fine<|end|>"
+    assert learned.replace(" ", "") == "thanks<|end|>fine<|end|>" and not cut
+    # A reply that repeats the user's words is learned from the assistant's turn, not found in the user's.
+    echo = [{"role": "user", "content": "thanks"}, {"role": "assistant", "content": "thanks"}]
+    ids, labels, _ = task._chat(echo)
+    text = tok.decode(ids)
+    learned_at = [i for i, label in enumerate(labels) if label != -100]
+    assert tok.decode([ids[i] for i in learned_at]).replace(" ", "") == "thanks<|end|>"
+    assert tok.decode(ids[: learned_at[0]]).replace(" ", "") == "<|user|>thanks<|end|><|assistant|>", text
+    # A conversation longer than max length is cut, and says so.
+    long = [{"role": "user", "content": "hello " * 50}, {"role": "assistant", "content": "thanks " * 50}]
+    ids, labels, cut = tasks.LanguageModel(tok, "chat", 40)._chat(long)
+    assert len(ids) == 40 and cut
+
+
+def test_text_and_prompts_start_with_the_models_bos_token(tiny_model):
+    from tokenizers import processors
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(tiny_model)
+    plain = tasks.LanguageModel(tok, "text", 8)
+    assert plain.bos == []  # the tiny tokenizer, like Qwen's, puts nothing at the start
+    ids, labels, cut = plain.example(0, {"text": ["hello world " * 20]})
+    assert len(ids) == 8 and ids[-1] == tok.eos_token_id and labels == ids and cut
+    # A tokenizer that starts every text with a beginning-of-text token, like Llama's or Gemma's.
+    bos = AutoTokenizer.from_pretrained(tiny_model)
+    bos.add_special_tokens({"bos_token": "<|user|>"})
+    bos.backend_tokenizer.post_processor = processors.TemplateProcessing(
+        single="<|user|> $A", special_tokens=[("<|user|>", bos.bos_token_id)])
+    assert bos("x").input_ids[0] == bos.bos_token_id
+    text = tasks.LanguageModel(bos, "text", 8)
+    ids, labels, cut = text.example(0, {"text": ["hello world " * 20]})
+    assert ids[0] == bos.bos_token_id and ids[-1] == bos.eos_token_id and len(ids) == 8 and cut
+    pairs = tasks.LanguageModel(bos, "pairs", 64)
+    ids, labels, cut = pairs.example(0, {"prompt": ["hello"], "completion": ["world"]})
+    assert ids[0] == bos.bos_token_id and labels[0] == -100 and ids[-1] == bos.eos_token_id and not cut
+    assert bos.decode([t for t in labels if t != -100]).replace(" ", "") == "world<|end|>"
+
+
+def test_a_steps_loss_weighs_every_token_the_same_whatever_batch_it_is_in(tmp_path, tiny_model, monkeypatch):
+    """Two batches a step, one of one-word replies and one of long ones: the step's loss (and gradient) is the mean
+    over all their tokens, not the mean of the two batches' means, which would weigh a short reply's tokens more."""
+    from anvil import parallel, train
+
+    short = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "yes"}]
+    long = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": " ".join(WORDS * 2)}]
+    chats = pd.DataFrame({"messages": [json.dumps(short if i % 2 else long) for i in range(16)]})
+    data = prepared(tmp_path, chats, chats.head(4))
+    cfg = run_config(tiny_model, data, train_as="lm", fmt="chat", maxSteps=3, every=3, batchSize=2, gradAccum=2)
+    run_dir = make_run(tmp_path, cfg)
+    sums, make = [], train.make_task
+
+    def make_task(*args):
+        task = make(*args)
+        loss_sum = task.loss_sum
+
+        def recorded(model, batch):
+            loss = loss_sum(model, batch)
+            sums.append((float(loss.detach()), batch["count"], batch["tokens"], batch["padded"]))
+            return loss
+
+        task.loss_sum = recorded
+        return task
+
+    monkeypatch.setattr(train, "make_task", make_task)
+    monkeypatch.setenv("ANVIL_DEVICE", "cpu")
+    train.train(cfg, run_dir, train.Reporter(run_dir), False, parallel.Group())
+    lines = [m for m in metrics(run_dir) if m["type"] == "train"]
+    assert [m["step"] for m in lines] == [1, 2, 3]
+    for step, entry in enumerate(lines):
+        batches = sums[2 * step: 2 * step + 2]
+        counts = [c for _, c, _, _ in batches]
+        assert len(batches) == 2 and min(counts) * 4 < max(counts)  # one batch of short replies, one of long
+        by_token = sum(s for s, *_ in batches) / sum(counts)
+        by_batch = np.mean([s / c for s, c, _, _ in batches])
+        assert entry["loss"] == pytest.approx(by_token, rel=1e-5) and abs(by_token - by_batch) > 1e-3
+        assert entry["padding"] == pytest.approx(1 - sum(t for _, _, t, _ in batches) / sum(p for *_, p in batches))
+        assert entry["tokens"] == sum(t for _, _, t, _ in sums[: 2 * step + 2])
+        assert entry["grad_norm"] > 0 and entry["grad_norm_max"] >= entry["grad_norm"]
+    status = json.loads((run_dir / "status.json").read_text())
+    assert status["tokens_seen"] == lines[-1]["tokens"] and status["truncated"] == 0 and status["grad_norm"] > 0
+    state = json.loads((run_dir / "checkpoints" / "step-0000003" / "state.json").read_text())
+    assert state["tokens"] == status["tokens_seen"]
+
+
+def test_a_full_fine_tune_trains_bf16_weights_with_stochastic_rounding(tmp_path, tiny_model):
+    import torch
+    from safetensors.torch import load_file
+
+    chats = pd.DataFrame({"messages": [json.dumps([{"role": "user", "content": f"hello {w}"},
+                                                   {"role": "assistant", "content": f"thanks {w}"}]) for w in WORDS]})
+    data = prepared(tmp_path, chats, chats.head(4))
+    cfg = run_config(tiny_model, data, train_as="lm", fmt="chat", maxSteps=6, every=3, learningRate="1e-4")
+    cfg["training_type"] = "full"
+    run_dir = make_run(tmp_path, cfg)
+    status = finish(start(run_dir), run_dir)
+    assert status["state"] == "done" and status["step"] == 6
+    saved = load_file(str(run_dir / "checkpoints" / "step-0000006" / "model" / "model.safetensors"))
+    before = load_file(str(tiny_model / "model.safetensors"))
+    assert all(v.dtype == torch.bfloat16 for v in saved.values())  # the weights stayed bf16
+    moved = sum((saved[k].float() != before[k].float()).sum().item() for k in saved) / sum(v.numel() for v in saved.values())
+    assert moved > 0.3, moved  # at 1e-4 on bf16 weights, most updates would round away without the rounding
+    assert "optimizer" in torch.load(run_dir / "checkpoints" / "step-0000006" / "optimizer.pt", weights_only=False)
+    assert (run_dir / "model" / "merged" / "model.safetensors").exists()
+
+
+def test_rows_cut_to_fit_max_length_are_counted(tmp_path, tiny_model, monkeypatch):
+    from anvil import parallel, train
+
+    from transformers import AutoTokenizer
+
+    chats = pd.DataFrame({"messages": [json.dumps([{"role": "user", "content": "hello"},
+                                                   {"role": "assistant", "content": " ".join(WORDS * 4 if i % 2 else ["yes"])}])
+                                       for i in range(8)]})
+    data = prepared(tmp_path, chats, chats.head(2))
+    cfg = run_config(tiny_model, data, train_as="lm", fmt="chat", maxSteps=2, every=2, batchSize=4, maxLength=48)
+    run_dir = make_run(tmp_path, cfg)
+    monkeypatch.setenv("ANVIL_DEVICE", "cpu")
+    train.train(cfg, run_dir, train.Reporter(run_dir), False, parallel.Group())
+    task = tasks.LanguageModel(AutoTokenizer.from_pretrained(tiny_model), "chat", 48)
+    items, parsed = task.items(chats)
+    assert [task.example(i, parsed)[2] for i in items] == [False, True] * 4
+    status = json.loads((run_dir / "status.json").read_text())
+    assert status["truncated"] == 4  # the four long rows: all eight were trained on in two steps of four
 
 
 def test_auroc_matches_hand_counted_cases():
@@ -512,6 +647,9 @@ def test_a_running_run_or_its_judge_blocks_deleting(run_settings):
     ({"trainingType": "qlora"}, "QLoRA"),
     ({"trainAs": "lm"}, "needs chat"),
     ({"hyper": {**FORM["hyper"], "learningRate": "fast"}}, "isn't a number"),
+    ({"checkpoints": {**FORM["checkpoints"], "minGain": -1}}, "least gain that counts"),
+    ({"checkpoints": {**FORM["checkpoints"], "minGain": "lots"}}, "least gain that counts"),
+    ({"hyper": {**FORM["hyper"], "masterWeights": "fp64"}}, "bf16 or fp32"),
 ])
 def test_unsupported_runs_say_why(run_settings, change, reason):
     with pytest.raises(ValueError, match=reason):
@@ -704,6 +842,43 @@ def test_picking_rules():
     assert picking.problem("overall", {"noul"}) is None and picking.problem("auroc", None) is None
     assert "needs choice questions" in picking.problem("macro_f1", {"noul", "score"})
     assert "Unknown" in picking.problem("vibes", {"noul"})
+    # The least gain that counts: a rise within it is neither a new best nor a fresh start for the no-gain count.
+    board = {"entries": [], "best_step": None}
+    for step, auroc in [(10, 0.70), (20, 0.705), (30, 0.709), (40, 0.72)]:
+        board = picking.record(board, step, {"auroc": auroc, "se": {"auroc": 0.02}}, "auroc", min_gain=0.01)
+    assert board["best_step"] == 40 and picking.checks_without_gain(board) == 0
+    assert board["entries"][0]["se"] == 0.02 and "se" not in picking.record(board, 50, {"auroc": 0.5}, "auroc")["entries"][-1]
+    board = picking.record(board, 60, {"auroc": 0.725}, "auroc", min_gain=0.01)
+    assert board["best_step"] == 40 and picking.checks_without_gain(board) == 2  # 0.725 is within 0.01 of 0.72
+    assert picking.stop_reason(board, 2, min_gain=0.01) == "Mean AUROC didn't improve by at least 0.01 for 2 checks in a row"
+    assert picking.min_gain({"checkpoints": {}}) == 0 and picking.min_gain({"checkpoints": {"minGain": 0.005}}) == 0.005
+
+
+def test_scores_come_with_their_standard_errors():
+    rng = np.random.default_rng(1)
+    gold = rng.random(400) < 0.3
+    yes = np.clip(gold * 0.4 + rng.random(400) * 0.6, 0, 1)
+    out = {"loss": list(-np.log(np.where(gold, yes, 1 - yes))), "correct": list((yes >= 0.5) == gold),
+           "confidence": list(np.maximum(yes, 1 - yes)), "questions": {}}
+    tasks.note(out["questions"], "rude", "noul", yes=yes.tolist(), gold=gold.tolist())
+    out["questions"][("rude", "noul")] = {"yes": yes.tolist(), "gold": gold.tolist()}
+    picked = rng.choice(["a", "b", "c"], 60)
+    out["questions"][("kind", "choice")] = {"picked": picked.tolist(), "gold": rng.choice(["a", "b", "c"], 60).tolist()}
+    out["loss"] += [0.5] * 60
+    out["correct"] += [True] * 60
+    out["confidence"] += [0.9] * 60
+    scores = tasks.decision_metrics(out, 460, 0.01)
+    se = scores["se"]
+    assert {"val_loss", "accuracy", "ece", "auroc", "catch_rate", "false_alarms", "macro_f1", "overall"} <= set(se)
+    assert 0.01 < se["auroc"] < 0.06 and 0.02 < se["macro_f1"] < 0.12 and se["val_loss"] > 0
+    assert se == tasks.standard_errors(out, 0.01)  # seeded: the trainer and the judge get the same numbers
+    few = {"loss": [0.1], "correct": [True], "confidence": [0.9], "questions": {}}
+    assert tasks.decision_metrics(few, 1, 0.01)["se"] == {}
+    rows = {"rows": [[2.0, 4, 1], [1.0, 2, 1], [6.0, 4, 0]] * 10}
+    lm = tasks.LanguageModel.metrics(rows, 30)
+    assert lm["val_loss"] == pytest.approx(9 / 10) and lm["token_accuracy"] == pytest.approx(0.2)
+    assert 0 < lm["se"]["val_loss"] < 0.5 and 0 < lm["se"]["token_accuracy"] < 0.2
+    assert tasks.LanguageModel.combine([{"rows": [[1.0, 1, 1]]}, {"rows": [[2.0, 2, 0]]}]) == {"rows": [[1.0, 1, 1], [2.0, 2, 0]]}
 
 
 def test_catch_rate_and_calibration():

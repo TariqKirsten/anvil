@@ -64,18 +64,26 @@ same settings again is instant.
 ## Training
 
 **Start training** checks the whole form, then starts a separate trainer process. The run gets its own page (Runs,
-top left) with progress (steps and epochs), speed, time left, GPU memory, the loss and validation charts (a click on
-one opens it bigger, and it follows the run live there too), a table of every validation check (newest first, in a box
-of its own that scrolls), the final test, the checkpoints and the log.
+top left) with progress (steps and epochs), speed, time left, GPU memory, the gradient norm, the tokens trained on, the
+padding and the rows cut by max length, the loss and validation charts (the validation loss on the training chart too,
+so the gap between them shows), the gradient norm and learning rate charts (a click on any chart opens it bigger, and
+it follows the run live there too), a table of every validation check (newest first, in a box of its own that
+scrolls), the final test, the checkpoints and the log. A language model's page also has sample replies: at every
+check the model answers the same three validation prompts, shown next to the replies the data gives.
 
 - An **epoch** is one pass over the training rows. A **step** learns from one batch: batch size × the number of
   training cards × gradient accumulation rows. The form shows how many steps an epoch takes; **Max steps** cuts a run
   short (handy for quick tests).
 
+- Every token a language model learns from, and every question a decision model answers, weighs the same in a step:
+  the step's loss is averaged over all of its batches (gradient accumulation) and all of its cards together, so a
+  batch of short rows doesn't count as much as a batch of long ones. The training loss on the run page is that
+  average, so it compares with the validation loss.
+
 - **Decision models** train one of two ways (Method, under Train as):
   - **Letters**: each question lists its options as A, B, C… and the model's scores for the letters are its answer.
-    Option order is shuffled per row so no letter is favoured; validation asks every question in both orders and
-    averages. Nothing is added to the model. One pass per question.
+    Option order is shuffled per row, and differently in each epoch, so no letter is favoured; validation asks every
+    question in both orders and averages. Nothing is added to the model. One pass per question.
   - **Clef head**: Cloudflare's design. A row's state and all its questions are one prompt, and a small new network
     (the head, about 30M parameters on a 2B model) reads the model's hidden states at each question and option and
     scores every option: one pass per row. A new head trains alone for the first 10% of the steps, at its own learning
@@ -96,8 +104,19 @@ of its own that scrolls), the final test, the checkpoints and the log.
   - The run page has a **By question** table for any check or the final test, with how many rows asked each question
     and how often each answer came up. An answer seen fewer than 30 times shows in amber: the scores beside it are
     rough.
-- **Language models** learn chat (only the assistant's replies), prompt and completion (only the completion), or plain
-  text.
+- **Language models** learn chat (only the assistant's replies, each with the token that ends its turn, so the model
+  learns to stop), prompt and completion (only the completion, ended the same way), or plain text. Plain text and
+  prompts start with the model's beginning-of-text token when its tokenizer uses one (Llama, Gemma; Qwen has none).
+  A row longer than Max length is cut to fit; the run page counts them, since a cut reply loses its ending.
+- **Full** fine-tuning keeps the weights in bf16, about 8 bytes a parameter with AdamW's two moments plus the
+  activations, so a 2B model fits a 32 GB card. bf16 can't hold a small update: a step of 2e-5 on a weight near 0.02
+  is below its resolution, so a plain optimizer rounds most updates away (on Qwen3.5-0.8B half the weights didn't
+  move at all in a step at 2e-5) and rounds the rest up to a whole unit. anvil's optimizer (`anvil/optim.py`) does
+  the maths in fp32 and rounds the results into bf16 stochastically, up or down with the probability of where the
+  value lies, so the weights and Adam's moments are right on average and small updates add up over steps. **Weights
+  while training** under Advanced puts the weights in fp32 instead, as mixed precision does, at twice the memory
+  (about 1B parameters on a 32 GB card); the finished model is saved in bf16 either way. The form's learning rate
+  for Full is 2e-5 (1e-5 with the Clef head), a tenth of LoRA's.
 - Checkpoints keep the trainable weights and the optimizer, so **Stop** loses at most one step and **Resume** continues
   exactly where it stopped, after a crash too.
 - **Resume** and **Keep training** (below) ask how many epochs the run makes in all, so it can train longer or shorter
@@ -195,6 +214,11 @@ of its own that scrolls), the final test, the checkpoints and the log.
 - **Stop after no gain for** N checks ends training early once the score hasn't improved for N checks in a row
   (0 turns this off). Only the checks after the warmup count, and for a new Clef head after its steps alone too:
   until then the scores say little about where the model is going.
+- **Least gain that counts**: a check beats the best only by more than this, in the score's own units (0, the
+  default, counts any rise, as Hugging Face's and Keras's early stopping do by default). Every score comes with ± one
+  standard error, from a bootstrap over the validation rows; the run page shows it beside the picked score. Two checks
+  within about one of each other are a toss-up, so a gain of that size is noise: set the least gain to about the ±
+  and the run neither stops late for a drift nor picks a checkpoint for a gain that wasn't one.
 - **Keep training**, on a run that has finished, carries on from the newest checkpoint: one that stopped early before
   its last step, or, given more epochs, one that got there. It asks again: stop early after N more checks without a
   gain, or train to the last step.
@@ -248,4 +272,9 @@ Built in steps:
 Since then: every question scored by its type (yes/no, choice, score) for any dataset, a By question table, Pick best
 by that follows the data (with Overall for mixed data), and the catch rate's false alarm allowance as a setting. Then:
 Resume and Keep training with a new number of epochs, charts that open bigger, the validation checks newest first in
-a box that scrolls, and uploading a run's weights and GGUF files to Hugging Face.
+a box that scrolls, and uploading a run's weights and GGUF files to Hugging Face. And a pass over what limits the
+quality of the fine-tunes: every token weighs the same across a step's batches and cards, full fine-tuning's small
+updates no longer round away (bf16 weights rounded stochastically, or fp32 weights as an option), chat replies that
+echo the user are learned from the right turn, text starts with the model's BOS token, and the run page shows the
+gradient norm, the learning rate, what the run has seen, token accuracy and sample replies. Pick best by follows the
+field's recipe: a least gain that counts, and every score with its standard error.

@@ -145,9 +145,24 @@ export interface QuestionScore {
   mae?: number;
 }
 
-// A check's scores: numbers by name, and each question's own under "questions".
-export type Scores = { [key: string]: number | string | Record<string, QuestionScore> | undefined } & {
+// A language model's reply to a held-out prompt at a check (server/anvil/tasks.py, LanguageModel.samples): greedy, the
+// same prompts at every check. ended: it stopped by itself rather than running out of room at `tokens`.
+export interface Sample {
+  prompt: string;
+  expected: string;
+  reply: string;
+  ended: boolean;
+  tokens: number;
+}
+
+// A check's scores: numbers by name, each question's own under "questions", one standard error of each score under
+// "se" (from a bootstrap over the validation sample's rows), and a language model's sample replies.
+export type Scores = {
+  [key: string]: number | string | Record<string, QuestionScore> | Record<string, number> | Sample[] | undefined;
+} & {
   questions?: Record<string, QuestionScore>;
+  se?: Record<string, number>;
+  samples?: Sample[];
 };
 
 export type RunState = "starting" | "loading" | "running" | "saving" | "done" | "failed" | "stopped";
@@ -184,6 +199,12 @@ export interface RunStatus {
   eta_s?: number | null;
   peak_mem_gb?: number | null;
   skipped?: number;
+  // Since the last log line: the gradient norm before clipping, and the share of batch positions that were padding.
+  // Over the whole run: tokens trained on, and rows cut to fit max length. Runs from before these were kept have none.
+  grad_norm?: number;
+  padding?: number;
+  tokens_seen?: number;
+  truncated?: number;
   started?: number;
   finished?: number;
   stopped?: number | null;
@@ -213,6 +234,9 @@ export interface RunStatus {
   ended?: { at: number; step: number; from: number | null } | null;
 }
 
+// A line of metrics.jsonl. A train line has loss, lr (and head_lr for Clef), tokens_per_s, peak_mem_gb, and, in runs
+// since these were kept, grad_norm and grad_norm_max (before clipping; head_grad_norm for Clef), padding, tokens and
+// truncated (both over the run so far).
 export type RunMetric = Scores & {
   type: "train" | "eval" | "resume" | "test" | "early_stop";
   step: number;
@@ -236,6 +260,7 @@ export interface RunDetail {
       patience: number;
       pickBy: string;
       falseAlarmPercent?: number;
+      minGain?: number; // a check beats the best only by more than this, in the score's units (runs from before: 0)
       countFrom?: number; // where Keep training picked up: early stopping counts the checks after it
     };
     created: number;
@@ -303,9 +328,10 @@ export interface ExportStatus {
   error?: string | null;
 }
 
-// server/anvil/picking.py: one entry per validation check; best_step is the checkpoint that becomes the model.
+// server/anvil/picking.py: one entry per validation check; best_step is the checkpoint that becomes the model. se: one
+// standard error of the score, from the validation sample (checks from before it was worked out have none).
 export interface Leaderboard {
-  entries: { step: number; score: number | null; metric: string; direction: "max" | "min" }[];
+  entries: { step: number; score: number | null; metric: string; direction: "max" | "min"; se?: number }[];
   best_step: number | null;
 }
 

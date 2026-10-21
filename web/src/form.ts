@@ -42,9 +42,12 @@ export interface FormState {
     precision: "bf16" | "fp16";
     gradCheckpointing: boolean;
     maxSteps: number;
+    // Full fine-tuning only: the weights stay bf16 (updates rounded stochastically) or go to fp32 (twice the memory).
+    masterWeights: "bf16" | "fp32";
   };
   // falseAlarmPercent: the catch rate counts the yes cases caught when at most this share of no cases is flagged.
-  checkpoints: { every: number; keepBest: number; patience: number; pickBy: string; falseAlarmPercent: number };
+  // minGain: a check beats the best only by more than this (in the score's own units; 0 counts any rise).
+  checkpoints: { every: number; keepBest: number; patience: number; pickBy: string; falseAlarmPercent: number; minGain: number };
 }
 
 // What each section gets: the form, and one way to change it.
@@ -74,13 +77,17 @@ export function pickByOptions(trainAs: TrainAs, types: Set<QuestionType> | null,
 }
 
 // The model's learning rate that suits each way of training. Clef from a plain model learned nothing at letters'
-// 2e-4 (the model's features moved faster than the new head could follow); 5e-5 worked.
-export function defaultLearningRate(form: Pick<FormState, "trainAs" | "decisionMethod">) {
-  return form.trainAs === "decision" && form.decisionMethod === "clef" ? "5e-5" : "2e-4";
+// 2e-4 (the model's features moved faster than the new head could follow); 5e-5 worked. Full fine-tuning moves every
+// weight, so it takes a tenth of LoRA's rate.
+export function defaultLearningRate(form: Pick<FormState, "trainAs" | "decisionMethod" | "trainingType">) {
+  const clef = form.trainAs === "decision" && form.decisionMethod === "clef";
+  if (form.trainingType === "full") return clef ? "1e-5" : "2e-5";
+  return clef ? "5e-5" : "2e-4";
 }
 
 // Switching the way of training moves the learning rate to the new default, unless you've set your own.
-export function withMethod(form: FormState, change: Partial<Pick<FormState, "trainAs" | "decisionMethod">>): FormState {
+export function withMethod(form: FormState,
+  change: Partial<Pick<FormState, "trainAs" | "decisionMethod" | "trainingType">>): FormState {
   const next = { ...form, ...change };
   const untouched = form.hyper.learningRate.trim() === defaultLearningRate(form);
   return untouched ? { ...next, hyper: { ...next.hyper, learningRate: defaultLearningRate(next) } } : next;
@@ -121,8 +128,9 @@ export const DEFAULTS: FormState = {
     precision: "bf16",
     gradCheckpointing: true,
     maxSteps: 0,
+    masterWeights: "bf16",
   },
-  checkpoints: { every: 500, keepBest: 3, patience: 3, pickBy: "overall", falseAlarmPercent: 1 },
+  checkpoints: { every: 500, keepBest: 3, patience: 3, pickBy: "overall", falseAlarmPercent: 1, minGain: 0 },
 };
 
 const KEY = "anvil.finetune.v1";
@@ -209,6 +217,7 @@ export function validate(form: FormState): Errors {
   if (!wholeNumber(c.patience, 0, 1000)) errors.patience = "Use 0 (never stop early) or a whole number.";
   if (form.trainAs === "decision" && !(c.falseAlarmPercent >= 0 && c.falseAlarmPercent <= 50))
     errors.falseAlarmPercent = "Use 0 to 50%.";
+  if (!(c.minGain >= 0 && c.minGain <= 10)) errors.minGain = "Use 0 (any rise counts) or a number up to 10.";
   if (!form.name.trim()) errors.name = "Give the run a name.";
   return errors;
 }

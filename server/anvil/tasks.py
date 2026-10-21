@@ -11,6 +11,11 @@ Three tasks:
 
 Both read the transformer's last hidden states and multiply only the rows of the output layer they need, instead of
 computing scores for the whole vocabulary at every position (Qwen3.5's 248k-word vocabulary makes that huge).
+
+A task's loss_sum is the batch's loss added up, not averaged, and its collate says what it's a sum over ("count": the
+tokens a language model learns from, the questions of a decision model). The trainer divides by the count of a whole
+step, over every batch of a gradient accumulation and every card, so each token or question weighs the same wherever
+it lands; a batch of short rows no longer counts as much as a batch of long ones.
 """
 
 from __future__ import annotations
@@ -29,6 +34,8 @@ from torch.utils.checkpoint import checkpoint
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 LOSS_CHUNK = 2048  # positions scored at once by the language-model loss
+SAMPLES = 3  # held-out prompts a language model answers at each check, for the run page
+SAMPLE_TOKENS = 96  # the most tokens a sample reply may run to
 
 
 def _value(value):
@@ -145,6 +152,10 @@ class Decisions:
     def metrics(self, out: dict, rows: int) -> dict:
         return decision_metrics(out, rows, self.false_alarm_rate)
 
+    def samples(self, model, items: list, parsed: dict, autocast) -> list[dict] | None:
+        """Sample replies at a check: only language models have them."""
+        return None
+
 
 class NoHead:
     """Tasks that train only the model itself (Clef also trains its head)."""
@@ -202,38 +213,46 @@ class DecisionLetters(Decisions, NoHead):
                                                + len(json.dumps(parsed["questions"][it.row][it.name]))) // 3.5 + 8)
                          for it in items])
 
-    def _encode(self, state: str, question: dict, name: str, order: list[int]) -> tuple[list[int], list[str]]:
+    def _encode(self, state: str, question: dict, name: str, order: list[int]) -> tuple[list[int], bool]:
+        """The prompt's token ids, and whether the state had to be cut to fit max length."""
         opts = options(question)
         lines = "\n".join(f"{LETTERS[k]}. {opts[o][1]}" for k, o in enumerate(order))
         tail = self.tok.encode(f"\n\nQuestion: {question.get('instructions') or name}\n{lines}\nAnswer:",
                                add_special_tokens=False)
         room = max(16, self.max_length - len(tail))
-        head = self.tok.encode(state, add_special_tokens=False)[:room]
-        return head + tail, [opts[o][1] for o in order]
+        head = self.tok.encode(state, add_special_tokens=False)
+        return head[:room] + tail, len(head) > room
 
     def collate(self, items: list[Item], parsed: dict, shuffle: bool, index_base: int = 0,
-                reverse: bool = False) -> dict:
-        ids, targets, n_options = [], [], []
+                reverse: bool = False, salt: int = 0) -> dict:
+        ids, targets, n_options, truncated = [], [], [], 0
         for n, it in enumerate(items):
             question = parsed["questions"][it.row][it.name]
             opts = options(question)
             order = list(range(len(opts)))
-            if shuffle:  # the same row always gets the same order, so a resumed run sees the same data
-                random.Random(self.seed * 1_000_003 + it.row * 7919 + zlib.crc32(it.name.encode())).shuffle(order)
+            if shuffle:  # the same row always gets the same order (for a salt: the epoch), so a resumed run sees
+                # the same data, and a later epoch shows the row's options under other letters
+                random.Random(self.seed * 1_000_003 + it.row * 7919 + zlib.crc32(it.name.encode())
+                              + salt * 15_485_863).shuffle(order)
             elif reverse:
                 order.reverse()
-            encoded, _ = self._encode(parsed["state"][it.row], question, it.name, order)
+            encoded, cut = self._encode(parsed["state"][it.row], question, it.name, order)
             vec = target(question, parsed["gold"][it.row][it.name], opts)
             ids.append(encoded)
+            truncated += cut
             targets.append([vec[o] for o in order])
             n_options.append(len(opts))
         width = max(n_options)
+        input_ids = pad(ids, self.tok.pad_token_id or 0)
         return {
-            "input_ids": pad(ids, self.tok.pad_token_id or 0),
+            "input_ids": input_ids,
             "lengths": torch.tensor([len(x) for x in ids]),
             "targets": torch.tensor([t + [0.0] * (width - len(t)) for t in targets]),
             "valid": torch.tensor([[k < n for k in range(width)] for n in n_options]),
+            "count": len(items),  # the loss is a sum over questions
             "tokens": sum(len(x) for x in ids),
+            "padded": input_ids.numel(),
+            "truncated": truncated,
         }
 
     def logits(self, model, batch: dict) -> torch.Tensor:
@@ -247,11 +266,12 @@ class DecisionLetters(Decisions, NoHead):
         logits = last.float() @ weight.float().T
         return logits.masked_fill(~batch["valid"].to(device), float("-inf"))
 
-    def loss(self, model, batch: dict) -> torch.Tensor:
+    def loss_sum(self, model, batch: dict) -> torch.Tensor:
+        """Cross-entropy against the gold answers, added up over the batch's questions."""
         logits = self.logits(model, batch)
         targets = batch["targets"].to(logits.device)
         logp = torch.log_softmax(logits, dim=-1).masked_fill(~batch["valid"].to(logits.device), 0.0)
-        return -(targets * logp).sum(-1).mean()
+        return -(targets * logp).sum()
 
     @torch.no_grad()
     def _probabilities(self, model, items: list[Item], parsed: dict, autocast, reverse: bool) -> torch.Tensor:
@@ -310,10 +330,52 @@ def decision_metrics(out: dict, rows: int, false_alarm_rate: float) -> dict:
 
     auroc, catch_rate, false_alarms, macro_f1 and mae average them over the questions of their type. overall averages
     a 0-to-1 quality over every question: its AUROC, its macro-F1, or 1 - its MAE / (levels - 1).
+
+    "se" holds one standard error of each of those averages: how much the score would move on another sample of
+    validation rows like this one, from a bootstrap (standard_errors). The run page shows it, and two checks within
+    about one of each other are a toss-up.
     """
+    result = _decision_scores(out, false_alarm_rate)
+    result["rows"] = rows
+    result["se"] = standard_errors(out, false_alarm_rate)
+    return result
+
+
+AGGREGATES = ("val_loss", "accuracy", "ece", "auroc", "catch_rate", "false_alarms", "macro_f1", "mae", "overall")
+BOOTSTRAP = 100  # resamples behind each score's standard error
+
+
+def standard_errors(out: dict, false_alarm_rate: float, rounds: int = BOOTSTRAP, seed: int = 0) -> dict:
+    """One standard error of each aggregate score, from a bootstrap: the answers are resampled with replacement
+    (each question's on its own, since each is scored on its own) and every score worked out again, rounds times;
+    the spread of those is the error. Seeded, so the trainer and the judge agree."""
+    n = len(out["loss"])
+    if n < 2:
+        return {}
+    rng = np.random.default_rng(seed)
+    whole = {key: np.asarray(out[key]) for key in ("loss", "correct", "confidence")}
+    each = {key: {k: np.asarray(v) for k, v in answers.items()} for key, answers in out["questions"].items()}
+    draws: dict = {key: [] for key in AGGREGATES}
+    for _ in range(rounds):
+        idx = rng.integers(0, n, n)
+        sample = {key: values[idx] for key, values in whole.items()}
+        sample["questions"] = {}
+        for key, answers in each.items():
+            m = len(next(iter(answers.values())))
+            pick = rng.integers(0, m, m)
+            sample["questions"][key] = {k: v[pick] for k, v in answers.items()}
+        scores = _decision_scores(sample, false_alarm_rate)
+        for key in AGGREGATES:
+            if key in scores:
+                draws[key].append(scores[key])
+    return {key: float(np.std(values, ddof=1)) for key, values in draws.items() if len(values) > 1}
+
+
+def _decision_scores(out: dict, false_alarm_rate: float) -> dict:
+    """The scores themselves (see decision_metrics)."""
     correct = np.array(out["correct"], dtype=bool)
     result = {"val_loss": float(np.mean(out["loss"])), "accuracy": float(correct.mean()),
-              "ece": calibration_error(np.array(out["confidence"]), correct), "rows": rows}
+              "ece": calibration_error(np.array(out["confidence"]), correct)}
     scored, quality = {}, []
     types_of = Counter(name for name, _ in out["questions"])
     for (name, kind), answers in sorted(out["questions"].items()):
@@ -403,6 +465,17 @@ def calibration_error(confidence: np.ndarray, correct: np.ndarray, bins: int = 1
 
 # ---------------------------------------------------------------- language models
 
+SHOWN = 600  # characters of a sample's prompt and expected reply kept for the run page
+
+
+def _head(text: str) -> str:
+    return text if len(text) <= SHOWN else text[:SHOWN] + "…"
+
+
+def _tail(text: str) -> str:
+    return text if len(text) <= SHOWN else "…" + text[-SHOWN:]
+
+
 class LanguageModel(NoHead):
     kind = "lm"
 
@@ -415,6 +488,10 @@ class LanguageModel(NoHead):
                              "completion or plain text, or pick a model with a chat template.")
         self.eos = tokenizer.eos_token_id
         self.end_markers = sorted((t for t in tokenizer.all_special_tokens if t), key=len, reverse=True)
+        # Plain text and prompts start with the beginning-of-text token on models whose tokenizer puts one there
+        # (Llama, Gemma), as their pre-training did; Qwen has none. Chat gets it from the template.
+        first = tokenizer("x").input_ids[:1]
+        self.bos = first if tokenizer.bos_token_id is not None and first == [tokenizer.bos_token_id] else []
 
     def items(self, df) -> tuple[list[int], dict]:
         columns = {"chat": ["messages"], "pairs": ["prompt", "completion"], "text": ["text"]}[self.fmt]
@@ -430,16 +507,26 @@ class LanguageModel(NoHead):
             return len(parsed["text"][i])
         return np.array([min(self.max_length, chars(i) // 3.5 + 4) for i in items])
 
-    def _chat(self, messages: list[dict]) -> tuple[list[int], list[int]]:
-        """Token ids of the whole conversation, and labels that are -100 everywhere but the assistant's replies."""
+    @staticmethod
+    def _text(content) -> str:
+        return (content if isinstance(content, str) else json.dumps(content)).strip() if content is not None else ""
+
+    def _chat(self, messages: list[dict]) -> tuple[list[int], list[int], bool]:
+        """Token ids of the whole conversation, labels that are -100 everywhere but the assistant's replies, and
+        whether the conversation was cut to fit max length.
+
+        A reply is found in the rendered text as the template wrote it; the turn's end marker after it is learned too.
+        The search moves past every message in order, so a reply that repeats what the user said ("hello" to "hello")
+        is found in the assistant's turn, not the user's."""
         text = self.tok.apply_chat_template(messages, tokenize=False)
         spans, pos = [], 0
         for m in messages:
-            if m.get("role") != "assistant":
-                continue
-            content = m["content"] if isinstance(m["content"], str) else json.dumps(m["content"])
-            content = content.strip()
+            content = self._text(m.get("content"))
             start = text.find(content, pos) if content else -1
+            if m.get("role") != "assistant":
+                if start >= 0:
+                    pos = start + len(content)
+                continue
             if start < 0:
                 spans = None
                 break
@@ -455,71 +542,153 @@ class LanguageModel(NoHead):
         ids = enc["input_ids"][: self.max_length]
         labels = [tid if any(s <= a and b <= e and b > a for s, e in spans) else -100
                   for tid, (a, b) in zip(ids, enc["offset_mapping"])]
-        return ids, labels
+        return ids, labels, len(enc["input_ids"]) > self.max_length
 
-    def example(self, i: int, parsed: dict) -> tuple[list[int], list[int]]:
+    def example(self, i: int, parsed: dict) -> tuple[list[int], list[int], bool]:
+        """Token ids, labels (-100 where nothing is learned), and whether the row was cut to fit max length."""
         if self.fmt == "chat":
             return self._chat(parsed["messages"][i])
         if self.fmt == "pairs":
-            prompt = self.tok.encode(parsed["prompt"][i], add_special_tokens=False)
+            prompt = self.bos + self.tok.encode(parsed["prompt"][i], add_special_tokens=False)
             completion = self.tok.encode(parsed["completion"][i], add_special_tokens=False) + [self.eos]
             ids = (prompt + completion)[: self.max_length]
             labels = ([-100] * len(prompt) + completion)[: self.max_length]
-            return ids, labels
-        ids = self.tok.encode(parsed["text"][i], add_special_tokens=False)[: self.max_length - 1] + [self.eos]
-        return ids, list(ids)
+            return ids, labels, len(prompt) + len(completion) > self.max_length
+        text = self.tok.encode(parsed["text"][i], add_special_tokens=False)
+        room = self.max_length - 1 - len(self.bos)
+        ids = self.bos + text[:room] + [self.eos]
+        return ids, list(ids), len(text) > room
 
-    def collate(self, items: list[int], parsed: dict, shuffle: bool = False, index_base: int = 0) -> dict:
-        pairs = [self.example(i, parsed) for i in items]
+    def collate(self, items: list[int], parsed: dict, shuffle: bool = False, index_base: int = 0,
+                salt: int = 0) -> dict:
+        examples = [self.example(i, parsed) for i in items]
+        input_ids = pad([e[0] for e in examples], self.tok.pad_token_id or 0)
+        labels = pad([e[1] for e in examples], -100)
         return {
-            "input_ids": pad([p[0] for p in pairs], self.tok.pad_token_id or 0),
-            "labels": pad([p[1] for p in pairs], -100),
-            "tokens": sum(len(p[0]) for p in pairs),
+            "input_ids": input_ids,
+            "labels": labels,
+            "count": int((labels[:, 1:] != -100).sum()),  # the loss is a sum over the tokens it learns from
+            "tokens": sum(len(e[0]) for e in examples),
+            "padded": input_ids.numel(),
+            "truncated": sum(e[2] for e in examples),
         }
 
-    def _sum_and_count(self, model, batch: dict) -> tuple[torch.Tensor, int]:
+    def _sum_and_count(self, model, batch: dict, by_row: bool = False):
+        """The batch's loss added up over the tokens it learns from, and how many there are. For checks (by_row), each
+        row's own loss, token count and how many tokens the model's top guess got right, instead."""
         device = next(model.parameters()).device
         hidden = hidden_states(model, batch["input_ids"].to(device))
         labels = batch["labels"].to(device)[:, 1:]
         mask = labels != -100
         h, y = hidden[:, :-1][mask], labels[mask]
         _, head = decoder_and_head(model)
-        total = hidden.new_zeros((), dtype=torch.float32)
 
         def chunk_loss(h_part, y_part):
             return F.cross_entropy((h_part @ head.T).float(), y_part, reduction="sum")
 
-        for start in range(0, len(y), LOSS_CHUNK):  # recomputed in the backward pass, so only one chunk's scores
-            total = total + checkpoint(chunk_loss, h[start:start + LOSS_CHUNK], y[start:start + LOSS_CHUNK],
-                                       use_reentrant=False)
-        return total, int(len(y))
+        if not by_row:
+            total = hidden.new_zeros((), dtype=torch.float32)
+            for start in range(0, len(y), LOSS_CHUNK):  # recomputed in the backward pass, so only one chunk's scores
+                total = total + checkpoint(chunk_loss, h[start:start + LOSS_CHUNK], y[start:start + LOSS_CHUNK],
+                                           use_reentrant=False)
+            return total, int(len(y))
+        row_of = torch.arange(len(labels), device=device)[:, None].expand_as(mask)[mask]
+        loss = torch.zeros(len(labels), device=device)
+        hits = torch.zeros(len(labels), device=device)
+        for start in range(0, len(y), LOSS_CHUNK):
+            logits = (h[start:start + LOSS_CHUNK] @ head.T).float()
+            y_part, rows = y[start:start + LOSS_CHUNK], row_of[start:start + LOSS_CHUNK]
+            loss.index_add_(0, rows, F.cross_entropy(logits, y_part, reduction="none"))
+            hits.index_add_(0, rows, (logits.argmax(-1) == y_part).float())
+        return [[float(a), int(n), int(b)] for a, n, b in zip(loss.tolist(), mask.sum(1).tolist(), hits.tolist())]
 
-    def loss(self, model, batch: dict) -> torch.Tensor:
-        total, count = self._sum_and_count(model, batch)
-        return total / max(count, 1)
+    def loss_sum(self, model, batch: dict) -> torch.Tensor:
+        return self._sum_and_count(model, batch)[0]
 
     def evaluate(self, model, items: list[int], parsed: dict, batch_size: int, autocast) -> dict:
         return self.metrics(self.outputs(model, items, parsed, batch_size, autocast), len(items))
 
     @torch.no_grad()
     def outputs(self, model, items: list[int], parsed: dict, batch_size: int, autocast) -> dict:
-        total, count = 0.0, 0
-        for start in range(0, len(items), batch_size):
-            batch = self.collate(items[start:start + batch_size], parsed)
+        """Each row's loss, learned tokens and tokens guessed right."""
+        rows = []
+        order = [items[i] for i in np.argsort(self.lengths(items, parsed), kind="stable")]  # like with like: less padding
+        for start in range(0, len(order), batch_size):
+            batch = self.collate(order[start:start + batch_size], parsed)
             with autocast():
-                s, n = self._sum_and_count(model, batch)
-            total += float(s)
-            count += n
-        return {"total": total, "count": count}
+                rows += self._sum_and_count(model, batch, by_row=True)
+        return {"rows": rows}
 
     @staticmethod
     def combine(parts: list[dict]) -> dict:
-        return {"total": sum(p["total"] for p in parts), "count": sum(p["count"] for p in parts)}
+        return {"rows": [row for p in parts for row in p["rows"]]}
 
     @staticmethod
     def metrics(out: dict, rows: int) -> dict:
-        loss = out["total"] / max(out["count"], 1)
-        return {"val_loss": loss, "perplexity": float(math.exp(min(loss, 50))), "rows": rows}
+        """The loss and top-guess accuracy over every learned token, with one standard error of each from a bootstrap
+        over the rows (tokens of one row rise and fall together, so rows are what's resampled)."""
+        table = np.array(out["rows"], dtype=float).reshape(-1, 3)
+        loss, count, hits = table.sum(0)
+        count = max(count, 1)
+        result = {"val_loss": float(loss / count), "perplexity": float(math.exp(min(loss / count, 50))),
+                  "token_accuracy": float(hits / count), "rows": rows}
+        if len(table) >= 2:
+            rng = np.random.default_rng(0)
+            picks = rng.integers(0, len(table), (BOOTSTRAP, len(table)))
+            sums = table[picks].sum(1)  # each resample's loss, count and hits
+            counts = np.maximum(sums[:, 1], 1)
+            result["se"] = {"val_loss": float(np.std(sums[:, 0] / counts, ddof=1)),
+                            "token_accuracy": float(np.std(sums[:, 2] / counts, ddof=1))}
+        return result
+
+    def _prompt(self, i: int, parsed: dict) -> tuple[list[int], str, str]:
+        """A held-out row as a prompt: its token ids, the text to show (its end, when it's long: that's what the
+        reply answers), and the reply the data gives."""
+        if self.fmt == "chat":
+            messages = parsed["messages"][i]
+            if messages and messages[-1].get("role") == "assistant":
+                asked, expected = messages[:-1], self._text(messages[-1].get("content"))
+            else:
+                asked, expected = messages, ""
+            text = self.tok.apply_chat_template(asked, tokenize=False, add_generation_prompt=True)
+            shown = "\n\n".join(f"{m.get('role')}: {self._text(m.get('content'))}" for m in asked)
+            ids = self.tok(text, add_special_tokens=False).input_ids
+        elif self.fmt == "pairs":
+            shown, expected = parsed["prompt"][i], parsed["completion"][i]
+            ids = self.bos + self.tok.encode(shown, add_special_tokens=False)
+        else:  # plain text: carry on from its start
+            text = self.tok.encode(parsed["text"][i], add_special_tokens=False)
+            ids, shown, expected = self.bos + text[:32], self.tok.decode(text[:32]), self.tok.decode(text[32:32 + SAMPLE_TOKENS])
+        return ids, _tail(shown), _head(expected)
+
+    @torch.no_grad()
+    def samples(self, model, items: list[int], parsed: dict, autocast) -> list[dict]:
+        """A few held-out prompts answered by the model as it is now, next to the replies the data gives: what the
+        model has learned, which no number shows. Greedy, and the same prompts at every check, so checks compare.
+        ended: the reply stopped by itself, rather than running out of room."""
+        from transformers import GenerationConfig
+
+        device = next(model.parameters()).device
+        own = getattr(model, "generation_config", None)
+        eos = own.eos_token_id if own is not None and own.eos_token_id is not None else self.eos
+        eos_ids = set(eos if isinstance(eos, list) else [eos])
+        config = GenerationConfig(max_new_tokens=SAMPLE_TOKENS, do_sample=False, use_cache=True,
+                                  pad_token_id=self.tok.pad_token_id if self.tok.pad_token_id is not None else self.eos,
+                                  eos_token_id=sorted(eos_ids))
+        out = []
+        for i in items:
+            if len(out) >= SAMPLES:
+                break
+            ids, shown, expected = self._prompt(i, parsed)
+            if len(ids) + SAMPLE_TOKENS > self.max_length:  # a prompt the model couldn't read whole
+                continue
+            with autocast():
+                generated = model.generate(torch.tensor([ids], device=device), generation_config=config)
+            reply = generated[0, len(ids):].tolist()
+            out.append({"prompt": shown, "expected": expected,
+                        "reply": self.tok.decode(reply, skip_special_tokens=True).strip(),
+                        "ended": any(t in eos_ids for t in reply), "tokens": len(reply)})
+        return out
 
 
 # ---------------------------------------------------------------- decision models, the Clef way
@@ -543,8 +712,8 @@ def clef_target(question: dict, answer, option_ids: tuple[str, ...]) -> list[flo
 class DecisionClef(Decisions):
     """Each row (its state and every question with its allowed options) becomes one prompt, built by Clef's own
     encode_record. The head reads the model's hidden states over each question and option, and the option words'
-    output embeddings, and gives one score per option. The loss is cross-entropy against the gold answer, averaged over
-    questions. An item is a row, since one pass answers all of its questions."""
+    output embeddings, and gives one score per option. The loss is cross-entropy against the gold answer, one term per
+    question. An item is a row, since one pass answers all of its questions."""
 
     def __init__(self, tokenizer, max_length: int, head: torch.nn.Module, config: dict):
         from .vendor.clef import joint_schema_model as clef
@@ -607,7 +776,7 @@ class DecisionClef(Decisions):
         return np.array([min(self.max_length, (len(self.clef.render(parsed["state"][i]))
                                                + len(json.dumps(parsed["questions"][i]))) // 3.5 + 64) for i in items])
 
-    def collate(self, items: list[int], parsed: dict, shuffle: bool = False) -> dict:
+    def collate(self, items: list[int], parsed: dict, shuffle: bool = False, salt: int = 0) -> dict:
         records, targets = [], []
         for i in items:
             questions = parsed["questions"][i]
@@ -617,8 +786,13 @@ class DecisionClef(Decisions):
             targets.append([torch.tensor(clef_target(questions[q.question_id], parsed["gold"][i][q.question_id],
                                                      q.option_ids)) for q in record.questions])
         ids = [list(r.input_ids) for r in records]
-        return {"input_ids": pad(ids, self.tok.pad_token_id or 0), "lengths": torch.tensor([len(x) for x in ids]),
-                "records": records, "targets": targets, "tokens": sum(len(x) for x in ids)}
+        input_ids = pad(ids, self.tok.pad_token_id or 0)
+        return {"input_ids": input_ids, "lengths": torch.tensor([len(x) for x in ids]),
+                "records": records, "targets": targets,
+                "count": sum(len(r.questions) for r in records),  # the loss is a sum over questions
+                "tokens": sum(len(x) for x in ids), "padded": input_ids.numel(),
+                # encode_record cuts the state to fit, without saying so: a cut prompt is exactly max length long
+                "truncated": sum(len(x) >= self.max_length for x in ids)}
 
     def logits(self, model, batch: dict) -> list[list[torch.Tensor]]:
         """One tensor of option scores per question, per row."""
@@ -629,14 +803,14 @@ class DecisionClef(Decisions):
         _, output_embeddings = decoder_and_head(model)
         return self.head(hidden_states(model, ids), ids, mask, batch["records"], output_embeddings)
 
-    def loss(self, model, batch: dict) -> torch.Tensor:
-        total, count = None, 0
+    def loss_sum(self, model, batch: dict) -> torch.Tensor:
+        """Cross-entropy against the gold answers, added up over every question of every row."""
+        total = None
         for record_logits, record_targets in zip(self.logits(model, batch), batch["targets"]):
             for scores, t in zip(record_logits, record_targets):
                 term = -(t.to(scores.device) * torch.log_softmax(scores.float(), dim=-1)).sum()
                 total = term if total is None else total + term
-                count += 1
-        return total / count
+        return total
 
     def evaluate(self, model, items: list[int], parsed: dict, batch_size: int, autocast) -> dict:
         return self.metrics(self.outputs(model, items, parsed, batch_size, autocast), len(items))

@@ -5,7 +5,8 @@
 with HIP_VISIBLE_DEVICES set to the chosen card, or, to train on several cards at once, once per card through
 torchrun (see anvil.parallel). It reads the run's config.json, trains, and reports through files:
 - status.json       what it's doing right now: state, stage, step of total, speed, ETA, memory, error
-- metrics.jsonl     one line per logged step (training loss), per validation check, and the final test
+- metrics.jsonl     one line per logged step (training loss, learning rate, gradient norm, padding, tokens seen), per
+                    validation check (the scores, and a language model's sample replies), and the final test
 - leaderboard.json  every check's score on the "pick best by" metric, and the best checkpoint so far (anvil.picking)
 - log.txt           everything it prints (the server writes this file from the process output)
 - checkpoints/      the trainable weights plus the optimizer's state: the best few, and the newest for Resume
@@ -34,7 +35,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import picking
+from . import optim, picking
 
 if os.environ.get("ANVIL_SAFE_KERNELS") == "1":
     # The slow but plain paths, for models whose fast kernels misbehave. Must run before any model code is imported.
@@ -75,7 +76,7 @@ class Reporter:
         self.metrics.write(json.dumps(entry) + "\n")
         self.metrics.flush()
         print(" ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in entry.items()
-                       if not isinstance(v, dict)), flush=True)  # each question's scores are for the screen
+                       if not isinstance(v, (dict, list))), flush=True)  # question scores and samples are for the screen
 
     def fail(self, message: str) -> None:
         self.update(state="failed", stage="Failed", error=message, eta_s=None)
@@ -142,6 +143,7 @@ def device_and_dtype(cfg: dict):
 
 
 def load_model(cfg: dict, device, dtype, checkpoint: Path | None):
+    import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     m, h = cfg["model"], cfg["hyper"]
@@ -155,8 +157,15 @@ def load_model(cfg: dict, device, dtype, checkpoint: Path | None):
     tok = AutoTokenizer.from_pretrained(tokenizer_from, token=token, trust_remote_code=remote)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        weights, dtype=dtype if device.type == "cuda" else None, token=token, trust_remote_code=remote).to(device)
+    # Full fine-tuning keeps the weights in bf16, so a 2B model fits a 32 GB card, and the optimizer (anvil.optim)
+    # rounds its updates stochastically, since plain rounding loses most small updates in bf16. "Weights while
+    # training" under Advanced puts them in fp32 instead, at twice the memory, as mixed precision does. LoRA's base
+    # model stays bf16, since it's frozen; PEFT keeps the adapter weights in fp32. On the CPU (the tests) LoRA's base
+    # model is fp32, like everything else there.
+    fp32_weights = not lora and h.get("masterWeights") == "fp32"
+    load_dtype = None if fp32_weights or (lora and device.type != "cuda") else dtype
+    model = AutoModelForCausalLM.from_pretrained(weights, dtype=load_dtype, token=token,
+                                                 trust_remote_code=remote).to(device)
     model.config.use_cache = False
     if h["gradCheckpointing"]:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -312,6 +321,16 @@ def prune(run_dir: Path, keep_steps: set[int]) -> None:
             shutil.rmtree(path, ignore_errors=True)
 
 
+def with_samples(metrics: dict, samples: list | None) -> dict:
+    """A check's scores with a language model's sample replies, when the task has them."""
+    return {**metrics, "samples": samples} if samples is not None else metrics
+
+
+def without_samples(metrics: dict) -> dict:
+    """The scores alone, for status.json; the samples are in metrics.jsonl."""
+    return {k: v for k, v in metrics.items() if k != "samples"}
+
+
 def judge_alive(run_dir: Path) -> bool:
     try:
         status = json.loads((run_dir / "judge" / "status.json").read_text())
@@ -380,7 +399,12 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     groups = [{"params": backbone, "lr": float(h["learningRate"])}]
     if head:
         groups.append({"params": head, "lr": float(h.get("headLearningRate") or HEAD_LR)})
-    opt = torch.optim.AdamW(groups, weight_decay=float(h["weightDecay"]))
+    if any(p.dtype == torch.bfloat16 for p in backbone):  # full fine-tuning in bf16: updates rounded stochastically
+        rounding = torch.Generator(device=device)
+        rounding.manual_seed(seed)  # the same on every card, so their copies round alike and stay identical
+        opt = optim.AdamW(groups, weight_decay=float(h["weightDecay"]), generator=rounding)
+    else:
+        opt = torch.optim.AdamW(groups, weight_decay=float(h["weightDecay"]))
     # A new head is random at first, so the model would learn from noise: the head trains alone for a while.
     head_first = int(first_total * HEAD_FIRST) if fresh_head(cfg) else 0
 
@@ -427,6 +451,7 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     warm_until = head_first + warmup(head_first)
     count_after = max(warm_until, int(ck.get("countFrom") or 0))
     step = epoch = batch_index = 0
+    seen = [0, 0]  # tokens trained on so far, and rows cut to fit max length (checkpoints from before have neither)
     if state is not None:
         saved = torch.load(resume_from / "optimizer.pt", map_location=device, weights_only=False)
         opt.load_state_dict(saved["optimizer"])
@@ -440,6 +465,7 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
                 climbs[index] = (step, low, warm)
                 say(f"the learning rate climbs from {param_group['lr']:.3g} back to the schedule's "
                     f"{planned(step) * base:.3g} over {warm:,} steps", flush=True)
+        seen = [int(state.get("tokens", 0)), int(state.get("truncated", 0))]
         report.metric({"type": "resume", "step": step, "total": total})
     learner = group.wrap(model, task)
     my_shares = range(group.rank, shares, world)  # this card's shares of every batch, taken in turn
@@ -469,27 +495,32 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
         report.update(stage="Checking on validation")
         model.eval()
         out = task.outputs(model, val_items[group.rank::world], val_parsed, max(1, per_card * 2), autocast)
-        model.train()
         metrics = task.metrics(task.combine(group.gather(out)), len(val_items))
+        if group.main:  # a language model's sample replies, generated here while the other cards wait
+            metrics = with_samples(metrics, task.samples(model, val_items, val_parsed, autocast))
+        model.train()
         if not group.main:
             return
         report.metric({"type": "eval", "step": at_step, "by": "trainer", **metrics})
         with picking.updating(run_dir) as board:
-            picking.record(board, at_step, metrics, pick_by)
-        report.update(stage=training(), last_eval={"step": at_step, **metrics}, best_step=board.get("best_step"))
+            picking.record(board, at_step, metrics, pick_by, picking.min_gain(cfg))
+        report.update(stage=training(), last_eval={"step": at_step, **without_samples(metrics)},
+                      best_step=board.get("best_step"))
 
     def checkpoint() -> None:
         if not group.main:  # the copies are identical, so process 0 saves for every card
             return
         report.update(stage="Saving a checkpoint", saving_since=time.time())
         save_checkpoint(run_dir, model, tok, opt, sched, {"step": step, "epoch": epoch, "batch_index": batch_index,
-                                                          "world": shares, "saved": time.time()}, lora, task)
+                                                          "world": shares, "saved": time.time(),
+                                                          "tokens": seen[0], "truncated": seen[1]}, lora, task)
         if not judged_elsewhere:  # with a judge, the judge keeps the best and deletes the rest
             prune(run_dir, picking.keep(board, keep_best, [step_of(p) for p in checkpoints(run_dir)]))
         report.update(stage=training(), saving_since=None, checkpoints=[p.name for p in checkpoints(run_dir)])
 
     def early_stop_reason() -> str | None:
-        return picking.stop_reason(picking.load(run_dir) if judged_elsewhere else board, patience, count_after)
+        return picking.stop_reason(picking.load(run_dir) if judged_elsewhere else board, patience, count_after,
+                                   picking.min_gain(cfg))
 
     every = int(ck["every"])
     log_every = max(1, min(50, total // 200))
@@ -502,18 +533,21 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
     model.train()
-    # This step's loss, loss count and tokens on this card; the window's, all cards together, since the last log line.
-    mine = [0.0, 0, 0]
-    window = [0.0, 0, 0]
-    skipped, micro, in_a_row = 0, 0, 0
+    # This step's loss (added up), what it's a sum over (tokens learned from, or questions), tokens, padded positions
+    # and rows cut to fit max length, on this card; the window's, all cards together, since the last log line.
+    mine = [0.0, 0, 0, 0, 0]
+    window = [0.0, 0, 0, 0, 0]
+    grads = [0.0, 0.0, 0.0, 0]  # the window's gradient norms before clipping: the model's sum and max, the head's sum, steps
+    skipped, in_a_row, first = 0, 0, batch_index
 
     def skip(why: str) -> None:
-        """Every card drops the step's batches so far, so none of them spoils the weights and they stay in step. A rare
-        overflow costs a batch; batch after batch means the run can't go on, and it fails rather than spin forever."""
-        nonlocal skipped, micro, in_a_row
-        skipped, micro, in_a_row = skipped + 1, 0, in_a_row + 1
+        """Every card drops the step's batches, so none of them spoils the weights and they stay in step. A rare
+        overflow costs a step's batches; batch after batch means the run can't go on, and it fails rather than spin
+        forever."""
+        nonlocal skipped, in_a_row
+        skipped, in_a_row = skipped + 1, in_a_row + 1
         opt.zero_grad(set_to_none=True)
-        say(f"step {step + 1}: skipped batch {bi:,} of epoch {epoch}, {why}", flush=True)  # where to replay it from
+        say(f"step {step + 1}: skipped batch {first:,} of epoch {epoch}, {why}", flush=True)  # where to replay it from
         report.update(skipped=skipped)
         if in_a_row >= MAX_SKIPS:
             raise ValueError(f"Training can't go on after step {step:,}: {MAX_SKIPS} batches in a row had a loss or "
@@ -526,31 +560,42 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
     finished, early = step >= total, None
     while not finished:
         batches = tasks.length_grouped_batches(lengths, per_batch, random.Random(seed + epoch))
-        for bi in range(batch_index, len(batches)):
-            if len(batches[bi]) < shares:  # the data's last few rows: too few to give every share one
+        bi = batch_index
+        while bi < len(batches):
+            # A step's batches: the next accum of them (the data's last few rows, too few to give every share one,
+            # are left out). They're all built first, so the step's loss can be divided by its whole count, over every
+            # batch and every card: each token or question weighs the same wherever it lands, and a batch of short
+            # rows doesn't count as much as a batch of long ones.
+            first, todo = bi, []
+            while bi < len(batches) and len(todo) < accum:
+                if len(batches[bi]) >= shares:
+                    todo.append(batches[bi])
+                bi += 1
+            if not todo:  # the epoch is over
                 continue
-            last = micro + 1 >= accum or bi + 1 >= len(batches)  # the step's last batch: update the weights after it
+            step_batches = [task.collate([items[i] for i in b[share::shares]], parsed, shuffle=True, salt=epoch)
+                            for b in todo for share in my_shares]
+            units = max(1.0, group.sum([sum(b["count"] for b in step_batches)])[0])
             numbers = True
-            for k, share in enumerate(my_shares):
-                batch = task.collate([items[i] for i in batches[bi][share::shares]], parsed, shuffle=True)
-                with group.accumulating(learner, sync=last and k == len(my_shares) - 1):
+            for k, batch in enumerate(step_batches):
+                with group.accumulating(learner, sync=k == len(step_batches) - 1):
                     with autocast():
                         loss = learner(batch)
                     numbers = group.all(bool(torch.isfinite(loss)))  # a rare half-precision overflow on some card
                     if not numbers:
                         break
-                    # The cards average their gradients: a card with several shares averages its own too.
-                    (loss / (accum * len(my_shares))).backward()
+                    # The cards average their gradients, which world undoes: the step's gradient is then the sum of
+                    # every batch's over the step's count, on every card alike.
+                    (loss * (world / units)).backward()
                 mine[0] += float(loss.detach())
-                mine[1] += 1
+                mine[1] += batch["count"]
                 mine[2] += batch["tokens"]
+                mine[3] += batch["padded"]
+                mine[4] += batch["truncated"]
             if not numbers:
+                mine = [0.0, 0, 0, 0, 0]
                 skip("its loss wasn't a number")
                 continue
-            micro += 1
-            if not last:
-                continue
-            micro = 0
             # Each on its own, so a new head's big gradients don't shrink the model's.
             norms = [torch.nn.utils.clip_grad_norm_(params, 1.0) for params in (backbone, head) if params]
             if not group.all(all(torch.isfinite(n) for n in norms)):
@@ -558,6 +603,7 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
                 # optimizer into every weight: from then on every loss is NaN and every batch is skipped. Where this was
                 # written it came from a faulty card: one of two R9700s put an infinite gradient into a single weight
                 # now and then, while the same batches ran clean on the other. Such a run carries on on its good cards.
+                mine = [0.0, 0, 0, 0, 0]
                 skip("its gradients weren't numbers (" + ", ".join(
                     f"{name} {float(n):.3g}" for name, n in zip(("model", "head"), norms)) + ")")
                 continue
@@ -566,30 +612,39 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
             opt.zero_grad(set_to_none=True)
             step += 1
             in_a_row = 0
-            batch_index = bi + 1
+            batch_index = bi
+            # The gradients were averaged across the cards before clipping, so every card saw the same norms.
+            grads = [grads[0] + float(norms[0]), max(grads[1], float(norms[0])),
+                     grads[2] + (float(norms[1]) if head else 0.0), grads[3] + 1]
             # Every step the cards agree on whether to stop (Stop may reach one card first) and on the loss and tokens.
             judge_says = early_stop_reason() if group.main and judged_elsewhere else None
             agreed = group.sum([STOP["requested"], judge_says is not None, *mine])
             stop = agreed[0] > 0
             window = [w + a for w, a in zip(window, agreed[2:])]
-            mine = [0.0, 0, 0]
+            seen = [seen[0] + int(agreed[4]), seen[1] + int(agreed[6])]
+            mine = [0.0, 0, 0, 0, 0]
             if group.main and (step % log_every == 0 or step == total):
                 seconds = max(time.time() - window_start, 1e-9)
                 rate = (step - window_step) / seconds
                 step_rate = rate if step_rate is None else 0.7 * step_rate + 0.3 * rate
                 entry = {"type": "train", "step": step, "epoch": epoch, "loss": window[0] / max(window[1], 1),
-                         "lr": float(sched.get_last_lr()[0]), "tokens_per_s": window[2] / seconds}
+                         "lr": float(sched.get_last_lr()[0]), "tokens_per_s": window[2] / seconds,
+                         "grad_norm": grads[0] / max(grads[3], 1), "grad_norm_max": grads[1],
+                         "padding": 1 - window[2] / max(window[3], 1), "tokens": seen[0], "truncated": seen[1]}
                 if head:  # Clef's head has its own learning rate (the model's is 0 while the head trains alone)
                     entry["head_lr"] = float(sched.get_last_lr()[1])
+                    entry["head_grad_norm"] = grads[2] / max(grads[3], 1)
                 if device.type == "cuda":
                     entry["peak_mem_gb"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
                 report.metric(entry)
                 report.update(stage=training(), step=step, epoch=epoch, loss=entry["loss"],
-                              tokens_per_s=entry["tokens_per_s"],
+                              tokens_per_s=entry["tokens_per_s"], grad_norm=entry["grad_norm"],
+                              padding=entry["padding"], tokens_seen=seen[0], truncated=seen[1],
                               peak_mem_gb=entry.get("peak_mem_gb"), skipped=skipped,
                               eta_s=(total - step) / step_rate if step_rate else None)
             if step % log_every == 0 or step == total:
-                window = [0.0, 0, 0]
+                window = [0.0, 0, 0, 0, 0]
+                grads = [0.0, 0.0, 0.0, 0]
                 window_start, window_step = time.time(), step
             at_checkpoint = step % every == 0 or step == total
             if at_checkpoint and judged_elsewhere and not group.share(judge_alive(run_dir) if group.main else None):
@@ -602,7 +657,7 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
             if at_checkpoint or stop:
                 checkpoint()
             if at_checkpoint:  # the check and the save aren't training time
-                window[2] = 0
+                window[2] = window[3] = 0
                 window_start, window_step = time.time(), step
             if stop:
                 report.update(state="stopped", stage="Stopped", step=step, eta_s=None, stopped=time.time())
@@ -660,7 +715,7 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
             metrics = task.evaluate(model, val_items, val_parsed, batch, autocast)
             report.metric({"type": "eval", "step": step_of(path), "by": "trainer", **metrics})
             with picking.updating(run_dir) as board:
-                picking.record(board, step_of(path), metrics, pick_by)
+                picking.record(board, step_of(path), metrics, pick_by, picking.min_gain(cfg))
 
     best = board.get("best_step") or step
     if (best != step or swapped) and checkpoint_dir(run_dir, best).exists():
@@ -675,6 +730,7 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
         test_items, test_parsed = task.items(test_df)
         model.eval()
         final_test = {"step": best, **task.evaluate(model, test_items, test_parsed, batch, autocast)}
+        final_test = with_samples(final_test, task.samples(model, test_items, test_parsed, autocast))
         report.metric({"type": "test", **final_test})
 
     report.update(state="saving", stage="Saving the model", saving_since=time.time(), final_test=final_test,
@@ -694,6 +750,8 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
         task.save(out / "adapter")
         write_json(out / "adapter" / "anvil.json", about)
         model = model.merge_and_unload()
+    elif device.type == "cuda" and next(model.parameters()).dtype != dtype:
+        model = model.to(dtype)  # trained with fp32 weights; the finished model is bf16 (or fp16), like its base
     model.save_pretrained(out / "merged")
     tok.save_pretrained(out / "merged")
     task.save(out / "merged")

@@ -113,4 +113,4 @@ class _Loss(torch.nn.Module):
         self.task = task
 
     def forward(self, batch: dict) -> torch.Tensor:
-        return self.task.loss(self.model, batch)
+        return self.task.loss_sum(self.model, batch)

@@ -3,7 +3,7 @@
 // the values at the nearest step. ChartSection puts one in a section that opens it bigger, over the page.
 
 import { IconArrowsMaximize, IconX } from "@tabler/icons-react";
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type PointerEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import { Section } from "./ui";
 
 export interface Series {
@@ -55,12 +55,15 @@ export interface ChartProps {
   series: Series[];
   empty: string;
   marker?: { x: number; label: string };
+  // How a value reads on the axis and in the box of values, for numbers the decimals of the range don't suit (a
+  // learning rate of 5e-5, say).
+  format?: (y: number) => string;
   height?: number; // drawn this tall, in pixels
   detailed?: boolean; // more lines across, and the steps along the bottom (the big chart)
   onOpen?: () => void; // a click or a tap opens it bigger
 }
 
-export function Chart({ series, empty, marker, height = HEIGHT, detailed = false, onOpen }: ChartProps) {
+export function Chart({ series, empty, marker, format, height = HEIGHT, detailed = false, onOpen }: ChartProps) {
   const [box, setBox] = useState<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(520);
   const [hover, setHover] = useState<number | null>(null); // the step whose values show
@@ -157,7 +160,7 @@ export function Chart({ series, empty, marker, height = HEIGHT, detailed = false
         {grid.map((g) => (
           <g key={g}>
             <line x1={PAD.left} x2={width - PAD.right} y1={sy(g)} y2={sy(g)} className="chart-grid" />
-            <text x={PAD.left - 6} y={sy(g) + 4} textAnchor="end" className="chart-label">{g.toFixed(digits)}</text>
+            <text x={PAD.left - 6} y={sy(g) + 4} textAnchor="end" className="chart-label">{format ? format(g) : g.toFixed(digits)}</text>
           </g>
         ))}
         {marks.map((t) => (
@@ -217,7 +220,7 @@ export function Chart({ series, empty, marker, height = HEIGHT, detailed = false
           {hits.map(({ s, p }) => (
             <div key={s.label} className="chart-tip-row">
               <span className={`chart-key chart-${s.tone ?? "accent"}`}>{s.label}</span>
-              <span className="chart-tip-value">{p.y.toFixed(Math.min(4, digits + 1))}</span>
+              <span className="chart-tip-value">{format ? format(p.y) : p.y.toFixed(Math.min(4, digits + 1))}</span>
             </div>
           ))}
         </div>
@@ -232,8 +235,8 @@ function bigHeight() {
 }
 
 // A chart in its own section, which opens bigger in a dialog over the page: with a click or a tap on it, or its
-// button. The big one follows the run live, like the small one.
-export function ChartSection({ title, ...chart }: ChartProps & { title: string }) {
+// button. The big one follows the run live, like the small one. children: what goes under the small one (a hint).
+export function ChartSection({ title, children, ...chart }: ChartProps & { title: string; children?: ReactNode }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [open, setOpen] = useState(false);
   const [height, setHeight] = useState(bigHeight);
@@ -262,6 +265,7 @@ export function ChartSection({ title, ...chart }: ChartProps & { title: string }
       </button>
     )}>
       <Chart {...chart} onOpen={drawn ? show : undefined} />
+      {children}
       <dialog ref={dialogRef} className="chart-dialog" aria-label={title} tabIndex={-1} onClose={() => setOpen(false)}
         // A click beside the box, on the dimmed page, closes it too.
         onClick={(e) => e.target === e.currentTarget && dialogRef.current?.close()}>

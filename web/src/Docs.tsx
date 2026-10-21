@@ -240,6 +240,16 @@ export function Docs({ part, onLogout }: { part: string | null; onLogout: () => 
             <strong>Stop after no gain for</strong> ends a run early, so it steers the whole run, not just the final
             pick.
           </p>
+          <p>
+            This is the recipe the field uses (Hugging Face's metric_for_best_model and load_best_model_at_end, Keras's
+            and Lightning's EarlyStopping): one monitored score with a direction, the best checkpoint kept and loaded
+            at the end, patience counted in checks without a gain, and a least gain that counts (their min_delta). A
+            check beats the best only by more than <strong>Least gain that counts</strong>; a smaller rise neither
+            moves the pick nor starts the no-gain count again. 0 counts any rise, which is their default too. Every
+            score comes with ± one standard error on the run page, worked out by resampling the validation rows: set
+            the least gain to about that, and a run no longer stops late because the score drifted up by noise, or
+            picks a checkpoint for a gain that wasn't one.
+          </p>
           <p className="doc-callout">
             <IconInfoCircle size={16} aria-hidden />
             <span>
@@ -300,8 +310,12 @@ export function Docs({ part, onLogout }: { part: string | null; onLogout: () => 
           </li>
           <li>
             <strong>Small validation sets make every score jumpy</strong>, most of all the ones built on the top answer:
-            accuracy, macro-F1 and the catch rate. Validation loss is the steadiest. Checks use up to 2,000 validation
-            rows; below that, a bigger Validation&nbsp;% steadies them, at the cost of training rows.
+            accuracy, macro-F1 and the catch rate. Validation loss is the steadiest: it's a proper scoring rule, which
+            rewards honest probabilities, while AUROC only ranks and the top-answer scores depend on a cut-off. Checks
+            use up to 2,000 validation rows; below that, a bigger Validation&nbsp;% steadies them, at the cost of
+            training rows. The ± beside the picked score on the run page is one standard error: with 19 yes cases a
+            yes/no question's AUROC carries about ±0.08, and two checks within about one ± of each other are a
+            toss-up, so the pick between them is luck, and the picked score flatters the model by about that much.
           </li>
           <li>
             <strong>The test score is fair whatever you pick.</strong> The test set is used once, at the end, on the
