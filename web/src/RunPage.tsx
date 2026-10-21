@@ -110,6 +110,7 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
   const [run, setRun] = useState<RunDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
+  const [switching, setSwitching] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -176,6 +177,19 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setActing(false);
+    }
+  }
+
+  // The supervisor's switch counts at once, even while the run trains: it's read when the trainer crashes or goes quiet.
+  async function supervise(on: boolean) {
+    setSwitching(true);
+    try {
+      await api(`/api/runs/${id}/supervise`, { json: { on } });
+      setRun(await api<RunDetail>(`/api/runs/${id}`));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSwitching(false);
     }
   }
 
@@ -413,6 +427,14 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           <MoreStats status={st} />
         </div>
 
+        {(ACTIVE.has(st.state) || st.state === "stopped" || st.state === "failed" || canContinue) && (
+          <label className="supervise">
+            <input type="checkbox" checked={cfg.supervise !== false} disabled={switching}
+              onChange={(e) => supervise(e.target.checked)} />
+            Supervisor: start the trainer again after a crash or a freeze
+          </label>
+        )}
+
         {judge && (ACTIVE.has(st.state) || judge.state === "failed") && (
           <p className={judge.state === "failed" ? "warn-text" : "hint"}>
             Checks on GPU {judge.gpu}: {judge.state === "failed" ? judge.error ?? "the judge stopped." : judge.stage}
@@ -445,8 +467,11 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           : <p className="hint">Stopped at step {st.step.toLocaleString()}. Resume continues from the last checkpoint.</p>)}
         {!!st.crashes && st.last_crash && st.state !== "failed" && (
           <p className="warn-text">
-            {st.crashes === 1 ? "The trainer crashed " : `The trainer has crashed ${st.crashes} times, the last `}
-            {st.last_crash.step ? `after step ${st.last_crash.step.toLocaleString()}` : "while starting"}, and restarted
+            {st.crashes === 1
+              ? `The trainer ${st.last_crash.froze ? "froze" : "crashed"} `
+              : `The trainer has crashed ${st.crashes} times, the last `}
+            {st.last_crash.step ? `after step ${st.last_crash.step.toLocaleString()}` : "while starting"}
+            {st.crashes > 1 && st.last_crash.froze && " (it froze)"}, and restarted
             from {st.last_crash.from != null ? `the step-${st.last_crash.from.toLocaleString()} checkpoint` : "the start"}.
           </p>
         )}

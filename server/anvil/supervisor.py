@@ -11,6 +11,16 @@ trainer is torchrun, which stops every card when one of them dies; the restart c
 Crashing again and again from the same checkpoint is no fluke: after MAX_TRIES restarts from it the run fails, as it
 would have without this, and Resume tries again.
 
+A trainer can also freeze without crashing: a card stops answering (its firmware hangs, say), the GPU call waiting on
+it never returns, and the cards go idle while the status still says it's running. Nothing errors, so nothing else
+notices. The trainer rewrites its status at least every minute while it works (anvil.train's BEAT_S), so one that has
+said nothing for STALL_S has frozen: it's ended outright, every process of it, which is also what gets the kernel to
+reset a hung card, and started again like after a crash, FREEZE_PAUSE_S later. A checkpoint being saved gets
+SAVE_LIMIT_S, and loading the model isn't watched (a download takes as long as it takes).
+
+A run can switch the restarts off, from the form or the run page at any time (config.json's supervise, read when it
+matters): then a crash fails the run, as it would without this, and a freeze is left for Stop, which works either way.
+
 Stop comes here as stop.json, which runs.stop writes (a SIGTERM to this process, from a shell say, is a Stop too). This
 asks the trainer to stop after its current step, with a SIGTERM to it, or with several cards to each card's process: not
 to torchrun, which would pass it on and kill them 30 s later, perhaps halfway through saving the checkpoint. The trainer
@@ -39,6 +49,8 @@ MAX_TRIES = 3  # restarts from one checkpoint before giving up
 STOP_GRACE_S = 10 * 60  # after Stop, time to finish the step (seconds, minutes with a check) before it's ended outright
 SAVE_LIMIT_S = 30 * 60  # a save still going after this long is stuck (the other cards give up waiting for one then too)
 KILL_WAIT_S = 30  # how long ended processes get to go (one stuck in a GPU driver call may never)
+STALL_S = 15 * 60  # a working trainer that hasn't touched its status for this long has frozen
+FREEZE_PAUSE_S = 15  # after ending a frozen trainer, time for the kernel to reset a hung card before starting again
 SIGNALLED: dict = {}  # a SIGTERM's Stop: when, and when to end the trainer (stop.json's, if there's one, comes first)
 _child: subprocess.Popen | None = None
 
@@ -100,6 +112,20 @@ def _saving(run_dir: Path) -> bool:
     return bool(since) and time.time() - since < SAVE_LIMIT_S
 
 
+def _on(run_dir: Path) -> bool:
+    """Whether this is on for the run: config.json's supervise, which the run page can switch at any time (runs from
+    before it have none, and it's on). Off, a crash fails the run and a freeze waits for Stop."""
+    return _read(run_dir / "config.json").get("supervise", True) is not False
+
+
+def _frozen(run_dir: Path) -> dict | None:
+    """The trainer's status if it has frozen: working, not saving, and silent for STALL_S (None: it hasn't)."""
+    st = _read(run_dir / "status.json")
+    if st.get("state") not in ("running", "saving") or _saving(run_dir):
+        return None
+    return st if time.time() - st.get("updated", time.time()) > STALL_S else None
+
+
 def _stat(pid: int) -> tuple[int, str, int] | None:
     """A process's parent, state (Z: it has ended) and start time, from /proc (None: it's gone)."""
     try:
@@ -146,7 +172,7 @@ def _ask(several: bool) -> None:
 
 def _end() -> list[int]:
     """End the trainer outright: SIGKILL to it and every process under it, and wait for them to go. Returns those still
-    there after KILL_WAIT_S, stuck in the kernel (a hung GPU driver call): nothing ends those."""
+    there after KILL_WAIT_S, stuck in the kernel (a hung GPU driver call): nothing ends those, and the log says so."""
     procs = _under(_child.pid)
     for pid in procs:  # torchrun first, then the cards
         _send(pid, signal.SIGKILL)
@@ -156,21 +182,32 @@ def _end() -> list[int]:
         left = [pid for pid, started in procs.items()
                 if (info := _stat(pid)) and info[1] != "Z" and info[2] == started]  # the same process, still there
         if not left or time.time() > deadline:
+            for pid in left:
+                print(f"===== process {pid} is still there after SIGKILL: stuck in the GPU driver? Its card may need "
+                      "a reset or a reboot before it trains again =====", flush=True)
             return left
         time.sleep(0.2)
 
 
-def _watch(run_dir: Path, several: bool) -> tuple[int | None, float | None]:
-    """Wait for the trainer to end, and carry out Stop if it comes. Returns the trainer's exit code (None: it wouldn't
-    go even when killed) and, if Stop had to end it outright, when."""
+def _watch(run_dir: Path, several: bool) -> tuple[int | None, float | None, dict | None]:
+    """Wait for the trainer to end, carry out Stop if it comes, and end the trainer if it freezes. Returns its exit code
+    (None: it wouldn't go even when killed), when Stop had to end it outright, and if it froze, where and whether it
+    could be ended."""
     asked = False
     while True:
         try:
-            return _child.wait(timeout=0.5), None
+            return _child.wait(timeout=0.5), None, None
         except subprocess.TimeoutExpired:
             pass
         stop = _stop(run_dir)
         if stop is None:
+            st = _frozen(run_dir)
+            if st and _on(run_dir):
+                print(f"\n===== the trainer froze: nothing from it since {_when(st['updated'])}, at step "
+                      f"{st.get('step', 0)}, so it was ended outright (SIGKILL), {_when(time.time())} =====",
+                      flush=True)
+                left = _end()
+                return _child.poll(), None, {"step": st.get("step", 0), "stuck": bool(left)}
             continue
         if not asked:
             _ask(several)
@@ -181,10 +218,8 @@ def _watch(run_dir: Path, several: bool) -> tuple[int | None, float | None]:
             ended = time.time()
             print(f"\n===== Stop: the trainer hadn't stopped by itself, so it was ended outright (SIGKILL), "
                   f"{_when(ended)} =====", flush=True)
-            for pid in _end():
-                print(f"===== process {pid} is still there after SIGKILL: stuck in the GPU driver? Its card may need "
-                      "a reset or a reboot before it trains again =====", flush=True)
-            return _child.poll(), ended
+            _end()
+            return _child.poll(), ended, None
 
 
 def main() -> None:
@@ -196,10 +231,10 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _ask_to_stop)
     signal.signal(signal.SIGINT, _ask_to_stop)
     (run_dir / "stop.json").unlink(missing_ok=True)  # an old Stop's (runs._spawn removes them too); a new one signals
-    tries, start = 0, None
+    tries, start, how = 0, None, set()
     while True:
         _child = subprocess.Popen(command)  # the log and the environment (the Hugging Face token) carry over
-        code, ended = _watch(run_dir, several)
+        code, ended, froze = _watch(run_dir, several)
         st = _read(status_path)
         if st.get("state") not in ACTIVE:
             return  # done, stopped or failed: the trainer said how it ended
@@ -215,22 +250,47 @@ def main() -> None:
                       flush=True)
             print(f"===== stopped: Resume continues from {where} =====", flush=True)
             return
-        tries = tries + 1 if tries and newest == start else 1  # a newer checkpoint is progress: counting starts again
-        start = newest
-        crash = {"at": time.time(), "step": st.get("step", 0), "from": start}
-        st.update(crashes=st.get("crashes", 0) + 1, last_crash=crash, eta_s=None, updated=time.time())
-        if tries > MAX_TRIES:
-            st.update(state="failed", stage="Failed",
-                      error=f"The trainer crashed {tries} times in a row from {where}, so it was left there. The log "
-                            "shows each crash; Resume tries again.")
+        if not froze and not _on(run_dir):  # switched off: the crash ends the run, as it would without this
+            st.update(state="failed", stage="Failed", eta_s=None, updated=time.time(),
+                      error=f"The trainer crashed after step {st.get('step', 0):,} ({_how(code)}). The supervisor is "
+                            f"off for this run, so it wasn't started again: Resume continues from {where}.")
             _write(status_path, st)
-            print(f"\n===== the trainer crashed ({_how(code)}) {tries} times in a row from {where}: giving up "
+            print(f"\n===== the trainer crashed after step {st.get('step', 0)} ({_how(code)}), and the supervisor is "
+                  f"off: not starting it again, {time.strftime('%Y-%m-%d %H:%M:%S')} =====", flush=True)
+            return
+        tries = tries + 1 if tries and newest == start else 1  # a newer checkpoint is progress: counting starts again
+        how = (how if tries > 1 else set()) | {"froze" if froze else "crashed"}
+        start = newest
+        crash = {"at": time.time(), "step": st.get("step", 0), "from": start, **({"froze": True} if froze else {})}
+        st.update(crashes=st.get("crashes", 0) + 1, last_crash=crash, eta_s=None, updated=time.time())
+        if froze and froze["stuck"]:  # its card wouldn't take a new trainer either
+            st.update(state="failed", stage="Failed",
+                      error=f"The trainer froze after step {crash['step']:,} and couldn't be ended: it's stuck in the "
+                            f"GPU driver, so its card needs a reset or a reboot. Then Resume continues from {where}.")
+            _write(status_path, st)
+            print(f"\n===== the frozen trainer couldn't be ended: giving up {time.strftime('%Y-%m-%d %H:%M:%S')} =====",
+                  flush=True)
+            return
+        if tries > MAX_TRIES:
+            what = " or ".join(sorted(how))  # crashed, froze, or crashed or froze
+            st.update(state="failed", stage="Failed",
+                      error=f"The trainer {what} {tries} times in a row from {where}, so it was left there. The log "
+                            "shows each time; Resume tries again.")
+            _write(status_path, st)
+            detail = "" if froze else f" ({_how(code)})"
+            print(f"\n===== the trainer {what}{detail} {tries} times in a row from {where}: giving up "
                   f"{time.strftime('%Y-%m-%d %H:%M:%S')} =====", flush=True)
             return
-        st.update(state="starting", stage="Restarting after a crash", pid=os.getpid())
+        st.update(state="starting", stage=f"Restarting after a {'freeze' if froze else 'crash'}", pid=os.getpid())
         _write(status_path, st)
-        print(f"\n===== the trainer crashed after step {crash['step']} ({_how(code)}): restarting from {where}, "
-              f"try {tries} of {MAX_TRIES}, {time.strftime('%Y-%m-%d %H:%M:%S')} =====", flush=True)
+        if froze:
+            print(f"\n===== the trainer froze after step {crash['step']}: restarting from {where} in "
+                  f"{FREEZE_PAUSE_S} s, try {tries} of {MAX_TRIES}, {time.strftime('%Y-%m-%d %H:%M:%S')} =====",
+                  flush=True)
+            time.sleep(FREEZE_PAUSE_S)
+        else:
+            print(f"\n===== the trainer crashed after step {crash['step']} ({_how(code)}): restarting from {where}, "
+                  f"try {tries} of {MAX_TRIES}, {time.strftime('%Y-%m-%d %H:%M:%S')} =====", flush=True)
         if "--resume" not in command:
             command = [*command, "--resume"]
 

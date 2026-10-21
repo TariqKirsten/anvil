@@ -18,6 +18,8 @@ SERVER = Path(__file__).resolve().parents[1]
 # "crash, saved" saves a checkpoint there first. A crash is SIGKILL, which ends it as a segfault would, without a core.
 # The ones that can't stop stand in for a trainer wedged in a GPU call: "deaf" ignores SIGTERM, "save, then deaf" is
 # saving a checkpoint for 2 s first, and "dies after Stop" goes 0.3 s after SIGTERM, as a timed-out collective ends it.
+# "freeze" says nothing more, as a trainer on a card that stopped answering; "busy", "long save" and "loading" take 3 s
+# and then finish, the first saying it's still working (as every forward pass does), the others quiet meanwhile.
 TRAINER = """
 import json, os, signal, sys, time
 from pathlib import Path
@@ -31,7 +33,7 @@ act = plan[min(len(launches), len(plan)) - 1]
 
 
 def report(**fields):
-    status.update(fields)
+    status.update(fields, updated=time.time())
     (run / "status.tmp").write_text(json.dumps(status))
     os.replace(run / "status.tmp", run / "status.json")  # the supervisor reads it while this runs
 
@@ -61,6 +63,19 @@ if act == "save, then deaf":
     report(stage="Training", saving_since=None)  # Stop can end it from here on
 if act in ("wait", "deaf", "save, then deaf", "dies after Stop"):
     time.sleep(60)
+if act == "freeze":
+    (run / "frozen").write_text(str(os.getpid()))
+    time.sleep(60)
+if act == "long save":
+    report(stage="Saving a checkpoint", saving_since=time.time())
+if act == "loading":
+    report(state="loading", stage="Loading the model (downloading it first if needed)")
+if act in ("busy", "long save", "loading"):
+    for _ in range(12):
+        time.sleep(0.25)
+        if act == "busy":
+            report()
+    report(state="done", saving_since=None)
 """
 
 # Each card of a two-card run under the real torchrun: it hears Stop (and says so) but can't act on it, wedged.
@@ -79,15 +94,23 @@ time.sleep(60)
 """
 
 
-def supervise(run: Path, plan: list[str], command: list[str] | None = None) -> subprocess.Popen:
+def supervise(run: Path, plan: list[str], command: list[str] | None = None, on: bool | None = None,
+              **waits) -> subprocess.Popen:
+    """The supervisor over the stand-in trainer. on: the run's switch, in its config.json (None: no config.json, as
+    runs from before it have none); waits shortens some of the supervisor's own (STALL_S=1, say)."""
     run.mkdir(parents=True)
+    if on is not None:
+        (run / "config.json").write_text(json.dumps({"supervise": on}))
     (run / "trainer.py").write_text(TRAINER)
     (run / "plan.json").write_text(json.dumps(plan))
     (run / "status.json").write_text(json.dumps({"state": "starting", "step": 0}))
     log = (run / "log.txt").open("ab")
+    start = ["-m", "anvil.supervisor"]
+    if waits:
+        shorter = [f"supervisor.{k} = {v!r}" for k, v in waits.items()]
+        start = ["-c", "; ".join(["from anvil import supervisor", *shorter, "supervisor.main()"])]
     return subprocess.Popen(
-        [sys.executable, "-m", "anvil.supervisor", str(run), "--",
-         *(command or [sys.executable, str(run / "trainer.py"), str(run)])],
+        [sys.executable, *start, str(run), "--", *(command or [sys.executable, str(run / "trainer.py"), str(run)])],
         env={**os.environ, "PYTHONPATH": str(SERVER)}, stdout=log, stderr=subprocess.STDOUT)
 
 
@@ -147,6 +170,55 @@ def test_a_newer_checkpoint_counts_as_progress(tmp_path):
     st = status(run)
     assert st["state"] == "done" and st["crashes"] == 5 and st["last_crash"]["from"] == 50
     assert len(launches(run)) == 6
+
+
+def test_a_frozen_trainer_is_ended_and_started_again(tmp_path):
+    run = tmp_path / "run"
+    assert supervise(run, ["freeze", "done"], STALL_S=1.5, FREEZE_PAUSE_S=0.2).wait(timeout=60) == 0
+    st = status(run)
+    assert st["state"] == "done" and st["crashes"] == 1 and st["last_crash"]["froze"], st
+    assert st["last_crash"]["step"] == 10 and st["last_crash"]["from"] is None
+    assert launches(run) == [[], ["--resume"]] and gone(int((run / "frozen").read_text()))
+    log = (run / "log.txt").read_text()
+    assert "===== the trainer froze: nothing from it since " in log and ", at step 10, so it was ended outright" in log
+    assert "the trainer froze after step 10: restarting from the start in 0.2 s, try 1 of 3" in log
+
+
+def test_freezing_again_and_again_from_one_checkpoint_gives_up(tmp_path):
+    run = tmp_path / "run"
+    assert supervise(run, ["freeze"], STALL_S=1, FREEZE_PAUSE_S=0).wait(timeout=60) == 0
+    st = status(run)
+    assert st["state"] == "failed" and st["crashes"] == 4 and len(launches(run)) == supervisor.MAX_TRIES + 1
+    assert st["error"].startswith("The trainer froze 4 times in a row from the start")
+
+
+def test_switched_off_a_crash_fails_the_run(tmp_path):
+    run = tmp_path / "run"
+    assert supervise(run, ["crash", "done"], on=False).wait(timeout=60) == 0
+    st = status(run)
+    assert st["state"] == "failed" and "crashes" not in st and len(launches(run)) == 1, st
+    assert st["error"].startswith("The trainer crashed after step 10 (killed by SIGKILL). The supervisor is off")
+
+
+def test_a_freeze_waits_while_switched_off_and_is_ended_once_switched_on(tmp_path):
+    run = tmp_path / "run"
+    proc = supervise(run, ["freeze", "done"], on=False, STALL_S=1, FREEZE_PAUSE_S=0)
+    wait_for(lambda: (run / "frozen").exists())
+    with pytest.raises(subprocess.TimeoutExpired):
+        proc.wait(timeout=3)  # quiet for longer than STALL_S, and left alone
+    (run / "config.json").write_text(json.dumps({"supervise": True}))  # what the run page's switch does
+    assert proc.wait(timeout=30) == 0
+    st = status(run)
+    assert st["state"] == "done" and st["crashes"] == 1 and st["last_crash"]["froze"], st
+
+
+def test_only_a_trainer_quiet_at_work_has_frozen(tmp_path):
+    # Each takes 3 s, longer than STALL_S here: working and saying so, saving a checkpoint, and loading the model.
+    for act in ("busy", "long save", "loading"):
+        run = tmp_path / act.replace(" ", "-")
+        assert supervise(run, [act], STALL_S=1).wait(timeout=60) == 0
+        st = status(run)
+        assert st["state"] == "done" and "crashes" not in st and len(launches(run)) == 1, (act, st)
 
 
 def test_an_end_the_trainer_reports_is_left_alone(tmp_path):

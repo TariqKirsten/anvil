@@ -133,6 +133,13 @@ check the model answers the same three validation prompts, shown next to the rep
 - A trainer that crashes in native code (a segfault, or memory corruption in the GPU libraries) starts again by itself
   from the newest checkpoint, losing only the steps since. After three crashes in a row from the same checkpoint it
   gives up and the run fails; Resume tries again.
+- A trainer can also freeze: a card stops answering, the GPUs go idle, nothing errors, and the run page still says
+  Training. The trainer reports at least once a minute while it works, so one that has been quiet for 15 minutes is
+  ended and started again the same way (ending it is also what gets the kernel to reset a hung card). Saving a
+  checkpoint gets 30 minutes, and loading the model isn't watched, since a download takes as long as it takes.
+- Both restarts are the supervisor's, and each run can switch it off: under Checkpoints when you start it, or on the
+  run page at any time, even while it trains. Off, a crash fails the run and a freeze waits for you to Stop it. Stop
+  works either way.
 - A batch whose loss or gradients aren't numbers (NaN or infinity: a rare overflow, or a fault in the machine) is
   skipped on every card, so it can't spoil the weights; the log says which batch, and the run page counts them. After
   20 skipped in a row the run fails instead of skipping forever; Resume continues from the newest checkpoint.

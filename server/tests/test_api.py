@@ -1,3 +1,4 @@
+import json
 import time
 
 from fastapi.testclient import TestClient
@@ -90,3 +91,16 @@ def test_a_run_is_deleted_through_the_api(settings):
     assert answer.status_code == 200 and answer.json()["freed"] > 0 and not run.exists()
     assert c.delete("/api/runs/old-run").status_code == 404
     assert c.delete("/api/runs/Not_A_Run").status_code == 404
+
+
+def test_a_runs_supervisor_is_switched_through_the_api(settings):
+    c = client()
+    login(c)
+    run = settings.data / "runs" / "a-run"
+    run.mkdir(parents=True)
+    (run / "config.json").write_text('{"name": "a-run"}')
+    assert c.post("/api/runs/a-run/supervise", json={"on": False}).status_code == 200
+    assert json.loads((run / "config.json").read_text()) == {"name": "a-run", "supervise": False}
+    assert c.post("/api/runs/a-run/supervise", json={"on": True}).status_code == 200
+    assert json.loads((run / "config.json").read_text())["supervise"] is True
+    assert c.post("/api/runs/no-run/supervise", json={"on": True}).status_code == 404

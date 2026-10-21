@@ -261,6 +261,7 @@ def create(form: dict, prepare: dict, token: str | None) -> str:
         "judge_gpu": judge_gpu,
         "hyper": form["hyper"],
         "checkpoints": checkpoints,
+        "supervise": form.get("supervise", True) is not False,  # restarts after a crash or a freeze (anvil.supervisor)
         "created": time.time(),
     }
     _write(path / "config.json", cfg)
@@ -675,6 +676,16 @@ def stop(run_id: str, now: bool = False) -> None:
         if not supervising:
             raise
         os.kill(int(st["supervisor"]), signal.SIGTERM)  # the trainer just crashed: its supervisor won't start it again
+
+
+def supervise(run_id: str, on: bool) -> None:
+    """Switch the run's supervisor on or off, at any time, even while it trains: anvil.supervisor reads config.json's
+    supervise when the trainer crashes or goes quiet. On, it starts the trainer again; off, a crash fails the run and a
+    freeze waits for Stop."""
+    path = run_dir(run_id)
+    cfg = _read(path / "config.json")
+    cfg["supervise"] = bool(on)
+    _write(path / "config.json", cfg)
 
 
 def early_stopped(st: dict) -> bool:

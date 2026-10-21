@@ -1858,13 +1858,18 @@ html:has(.chart-dialog[open]) {
   color: var(--text-2);
 }
 
-.spare-checks {
+.spare-checks,
+.supervise {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   margin: 2px 0 6px;
   font-size: 13px;
   cursor: pointer;
+}
+
+.hint + .supervise {
+  margin-top: 12px; /* the form's switch, after the section's own hints */
 }
 
 button.danger {

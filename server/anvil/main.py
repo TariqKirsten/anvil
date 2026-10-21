@@ -468,6 +468,19 @@ def stop_run(run_id: str, body: StopBody | None = None) -> dict:
     return {"ok": True}
 
 
+class SuperviseBody(BaseModel):
+    on: bool  # restart the trainer after a crash or a freeze, or leave the run to fail or wait for Stop
+
+
+@app.post("/api/runs/{run_id}/supervise")
+def supervise_run(run_id: str, body: SuperviseBody) -> dict:
+    try:
+        runs.supervise(run_id, body.on)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"ok": True}
+
+
 class ResumeBody(BaseModel):
     patience: int | None = None  # more checks without a gain to wait; 0 trains to the last step
     epochs: int | None = None  # passes over the training data in all, from the start; lifts a Max steps limit

@@ -18,6 +18,10 @@ only saves checkpoints, and watches the leaderboard the judge fills to know when
 Stop sends SIGTERM (anvil.supervisor passes it to every card's process): the run saves a checkpoint after the current
 step and exits, so stopping loses at most one step. One that can't get to the end of its step, wedged in a GPU call, is
 ended outright by the supervisor, but never while saving_since in the status says it's saving.
+
+Every forward pass of the model touches status.json (at most every BEAT_S), so it stays fresh while the trainer works,
+and goes quiet when a card stops answering: the supervisor then takes the trainer to have frozen, ends it and starts it
+again from the newest checkpoint.
 """
 
 from __future__ import annotations
@@ -50,6 +54,7 @@ JUDGE_SILENT_S = 90  # a judge that hasn't reported for this long is taken to be
 HEAD_LR = 1e-4  # Clef's head, unless the form says otherwise
 HEAD_FIRST = 0.1  # the share of the steps a new Clef head trains alone, before the model joins in
 MAX_SKIPS = 20  # batches skipped in a row (loss or gradients not numbers) before the run fails instead of going on
+BEAT_S = 60  # the status is touched at least this often while the model runs (anvil.supervisor's STALL_S is 15 min)
 STOP = {"requested": False}
 
 
@@ -73,6 +78,11 @@ class Reporter:
     def update(self, **fields) -> None:
         self.status.update(fields, updated=time.time())
         write_json(self.path, self.status)
+
+    def beat(self) -> None:
+        """Still working: the status's updated, at most every BEAT_S."""
+        if time.time() - self.status.get("updated", 0) >= BEAT_S:
+            self.update()
 
     def metric(self, entry: dict) -> None:
         self.metrics.write(json.dumps(entry) + "\n")
@@ -186,6 +196,19 @@ def load_model(cfg: dict, device, dtype, checkpoint: Path | None):
     else:
         model.requires_grad_(True)
     return tok, model
+
+
+def beating(model, report: Reporter):
+    """The model, beating on every forward pass: training, the checks, the final test and a language model's sample
+    replies all run it through its input embeddings."""
+    try:
+        layer = model.get_input_embeddings()
+    except NotImplementedError:  # custom code without them: the whole model's forward
+        layer = model
+    if not getattr(layer, "anvil_beats", False):  # a LoRA checkpoint swapped in keeps the model, and its hook
+        layer.register_forward_pre_hook(lambda module, args: report.beat())
+        layer.anvil_beats = True
+    return model
 
 
 def load_weights(model, task, checkpoint: Path, cfg: dict, device, dtype):
@@ -414,6 +437,7 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
                          f"{' or '.join(str(n) for n in range(1, shares + 1) if shares % n == 0)} of them.")
     report.update(stage="Loading the model (downloading it first if needed)")
     tok, model = load_model(cfg, device, dtype, resume_from)
+    beating(model, report)
 
     report.update(stage="Preparing batches")
     task = make_task(cfg, tok, model, device)
@@ -746,6 +770,7 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
             judged = {e["step"] for e in board["entries"]}
             if all(step_of(p) in judged for p in checkpoints(run_dir)) or not judge_alive(run_dir):
                 break
+            report.beat()  # the judge is working, and this with it
             time.sleep(2)
     judged = {e["step"] for e in board["entries"]}
     missing = [p for p in checkpoints(run_dir) if step_of(p) not in judged]
@@ -754,7 +779,7 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
         val_items, val_parsed = task.items(val_df)
         for path in missing:
             report.update(stage=f"Checking {path.name} on validation")
-            model = load_weights(model, task, path, cfg, device, dtype)
+            model = beating(load_weights(model, task, path, cfg, device, dtype), report)
             swapped = True
             model.eval()
             metrics = task.evaluate(model, val_items, val_parsed, batch, autocast)
@@ -765,7 +790,7 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
     best = board.get("best_step") or step
     if (best != step or swapped) and checkpoint_dir(run_dir, best).exists():
         report.update(stage=f"Loading the best checkpoint (step {best})")
-        model = load_weights(model, task, checkpoint_dir(run_dir, best), cfg, device, dtype)
+        model = beating(load_weights(model, task, checkpoint_dir(run_dir, best), cfg, device, dtype), report)
     prune(run_dir, picking.keep(board, int(ck.get("keepBest", 3)), [step_of(p) for p in checkpoints(run_dir)]))
 
     report.update(stage="Final test on the test split")

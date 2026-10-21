@@ -236,8 +236,8 @@ export interface RunStatus {
   final_test?: (Scores & { step: number; rows?: number }) | null;
   training_finished?: boolean;
   warm_until?: number; // the model has warmed up by this step: early stopping counts the checks after it
-  crashes?: number; // times the trainer crashed in native code and started again (anvil.supervisor)
-  last_crash?: { at: number; step: number; from: number | null } | null;
+  crashes?: number; // times the trainer crashed in native code, or froze, and started again (anvil.supervisor)
+  last_crash?: { at: number; step: number; from: number | null; froze?: boolean } | null;
   saving_since?: number | null; // the trainer is saving a checkpoint (or the model): Stop never cuts that off
   // While Stop is under way: when it was pressed, and when the trainer is ended outright if it hasn't stopped by itself
   // (ending: that time has come; Stop now brings it forward).
@@ -276,6 +276,7 @@ export interface RunDetail {
       minGain?: number; // a check beats the best only by more than this, in the score's units (runs from before: 0)
       countFrom?: number; // where Keep training picked up: early stopping counts the checks after it
     };
+    supervise?: boolean; // the trainer starts again after a crash or a freeze (runs from before: on)
     created: number;
   };
   status: RunStatus;

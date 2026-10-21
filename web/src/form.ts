@@ -16,6 +16,8 @@ export interface FormState {
   gpus: number[] | null;
   // A free card you didn't tick checks the checkpoints. Off: the training cards do, and that card stays free.
   spareChecks: boolean;
+  // The supervisor starts the trainer again after a crash or a freeze. Off: a crash fails the run, a freeze waits.
+  supervise: boolean;
   data: {
     train: DataSource | null;
     validation: DataSource | null;
@@ -102,6 +104,7 @@ export const DEFAULTS: FormState = {
   model: { source: "hub", repo: null, folder: "" },
   gpus: null,
   spareChecks: true,
+  supervise: true,
   data: {
     train: null,
     validation: null,

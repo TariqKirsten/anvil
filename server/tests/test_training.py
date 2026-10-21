@@ -238,6 +238,27 @@ def test_a_trainer_that_crashes_starts_again_from_its_newest_checkpoint(tmp_path
     assert "restarting from the step-" in (run_dir / "log.txt").read_text()
 
 
+def test_every_forward_pass_says_the_trainer_is_still_working(tmp_path, tiny_model, monkeypatch):
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    report = train.Reporter(tmp_path)
+    model = train.beating(AutoModelForCausalLM.from_pretrained(tiny_model), report)
+    train.beating(model, report)  # a LoRA checkpoint swapped in keeps the model, which isn't hooked twice
+    assert len(model.get_input_embeddings()._forward_pre_hooks) == 1
+
+    def updated() -> float:
+        with torch.no_grad():
+            model(input_ids=torch.tensor([[1, 2, 3]]))  # a check's forward pass, say
+        return json.loads((tmp_path / "status.json").read_text())["updated"]
+
+    first = updated()
+    assert updated() == first  # at most every BEAT_S
+    monkeypatch.setattr(train, "BEAT_S", 0)
+    time.sleep(0.01)
+    assert updated() > first
+
+
 def poison(monkeypatch, change) -> None:
     """The task's loss for each training batch becomes change(call, loss, model); call counts the batches from 1."""
     from anvil import train
@@ -535,6 +556,18 @@ def test_checks_can_stay_on_the_training_card_to_keep_the_spare_free(run_setting
     assert run_settings == [(run_id, [1], None)]
     other = runs.create({**FORM, "gpus": [0], "spareChecks": False}, {"train": {}}, None)  # the other card is free
     assert run_settings[-1] == (other, [0], None)
+
+
+def test_the_supervisor_is_on_unless_the_form_says_off_and_switches_at_any_time(run_settings):
+    def supervised(run_id: str) -> bool:
+        return json.loads((config.settings.data / "runs" / run_id / "config.json").read_text())["supervise"]
+
+    on = runs.create({**FORM, "gpus": [1], "spareChecks": False}, {"train": {}}, None)
+    off = runs.create({**FORM, "gpus": [0], "spareChecks": False, "supervise": False}, {"train": {}}, None)
+    assert supervised(on) is True and supervised(off) is False
+    runs.supervise(on, False)  # while they train: the supervisor reads it when it matters
+    runs.supervise(off, True)
+    assert supervised(on) is False and supervised(off) is True
 
 
 def test_a_busy_card_neither_trains_unpicked_nor_judges(run_settings, monkeypatch):

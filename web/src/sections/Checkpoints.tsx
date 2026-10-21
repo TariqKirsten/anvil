@@ -63,6 +63,16 @@ export function CheckpointSection({ form, update, errors, types }: SectionProps 
           {" "}<a href="#/docs">What each score means</a>, and when to use it.
         </p>
       )}
+      <label className="supervise">
+        <input type="checkbox" checked={form.supervise}
+          onChange={(e) => update((f) => ({ ...f, supervise: e.target.checked }))} />
+        Supervisor: start the trainer again after a crash or a freeze
+      </label>
+      <p className="hint">
+        It carries on from the newest checkpoint when the trainer crashes, or when it freezes (15 minutes without a word,
+        a card that stopped answering, say). Off, a crash fails the run and a freeze waits for you to stop it. The run
+        page can switch it at any time.
+      </p>
     </Section>
   );
 }
