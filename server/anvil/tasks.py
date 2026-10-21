@@ -330,10 +330,52 @@ def decision_metrics(out: dict, rows: int, false_alarm_rate: float) -> dict:
 
     auroc, catch_rate, false_alarms, macro_f1 and mae average them over the questions of their type. overall averages
     a 0-to-1 quality over every question: its AUROC, its macro-F1, or 1 - its MAE / (levels - 1).
+
+    "se" holds one standard error of each of those averages: how much the score would move on another sample of
+    validation rows like this one, from a bootstrap (standard_errors). The run page shows it, and two checks within
+    about one of each other are a toss-up.
     """
+    result = _decision_scores(out, false_alarm_rate)
+    result["rows"] = rows
+    result["se"] = standard_errors(out, false_alarm_rate)
+    return result
+
+
+AGGREGATES = ("val_loss", "accuracy", "ece", "auroc", "catch_rate", "false_alarms", "macro_f1", "mae", "overall")
+BOOTSTRAP = 100  # resamples behind each score's standard error
+
+
+def standard_errors(out: dict, false_alarm_rate: float, rounds: int = BOOTSTRAP, seed: int = 0) -> dict:
+    """One standard error of each aggregate score, from a bootstrap: the answers are resampled with replacement
+    (each question's on its own, since each is scored on its own) and every score worked out again, rounds times;
+    the spread of those is the error. Seeded, so the trainer and the judge agree."""
+    n = len(out["loss"])
+    if n < 2:
+        return {}
+    rng = np.random.default_rng(seed)
+    whole = {key: np.asarray(out[key]) for key in ("loss", "correct", "confidence")}
+    each = {key: {k: np.asarray(v) for k, v in answers.items()} for key, answers in out["questions"].items()}
+    draws: dict = {key: [] for key in AGGREGATES}
+    for _ in range(rounds):
+        idx = rng.integers(0, n, n)
+        sample = {key: values[idx] for key, values in whole.items()}
+        sample["questions"] = {}
+        for key, answers in each.items():
+            m = len(next(iter(answers.values())))
+            pick = rng.integers(0, m, m)
+            sample["questions"][key] = {k: v[pick] for k, v in answers.items()}
+        scores = _decision_scores(sample, false_alarm_rate)
+        for key in AGGREGATES:
+            if key in scores:
+                draws[key].append(scores[key])
+    return {key: float(np.std(values, ddof=1)) for key, values in draws.items() if len(values) > 1}
+
+
+def _decision_scores(out: dict, false_alarm_rate: float) -> dict:
+    """The scores themselves (see decision_metrics)."""
     correct = np.array(out["correct"], dtype=bool)
     result = {"val_loss": float(np.mean(out["loss"])), "accuracy": float(correct.mean()),
-              "ece": calibration_error(np.array(out["confidence"]), correct), "rows": rows}
+              "ece": calibration_error(np.array(out["confidence"]), correct)}
     scored, quality = {}, []
     types_of = Counter(name for name, _ in out["questions"])
     for (name, kind), answers in sorted(out["questions"].items()):
@@ -583,12 +625,20 @@ class LanguageModel(NoHead):
 
     @staticmethod
     def metrics(out: dict, rows: int) -> dict:
-        """The loss and top-guess accuracy over every learned token."""
+        """The loss and top-guess accuracy over every learned token, with one standard error of each from a bootstrap
+        over the rows (tokens of one row rise and fall together, so rows are what's resampled)."""
         table = np.array(out["rows"], dtype=float).reshape(-1, 3)
         loss, count, hits = table.sum(0)
         count = max(count, 1)
         result = {"val_loss": float(loss / count), "perplexity": float(math.exp(min(loss / count, 50))),
                   "token_accuracy": float(hits / count), "rows": rows}
+        if len(table) >= 2:
+            rng = np.random.default_rng(0)
+            picks = rng.integers(0, len(table), (BOOTSTRAP, len(table)))
+            sums = table[picks].sum(1)  # each resample's loss, count and hits
+            counts = np.maximum(sums[:, 1], 1)
+            result["se"] = {"val_loss": float(np.std(sums[:, 0] / counts, ddof=1)),
+                            "token_accuracy": float(np.std(sums[:, 2] / counts, ddof=1))}
         return result
 
     def _prompt(self, i: int, parsed: dict) -> tuple[list[int], str, str]:

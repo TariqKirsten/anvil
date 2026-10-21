@@ -155,9 +155,13 @@ export interface Sample {
   tokens: number;
 }
 
-// A check's scores: numbers by name, each question's own under "questions", and a language model's sample replies.
-export type Scores = { [key: string]: number | string | Record<string, QuestionScore> | Sample[] | undefined } & {
+// A check's scores: numbers by name, each question's own under "questions", one standard error of each score under
+// "se" (from a bootstrap over the validation sample's rows), and a language model's sample replies.
+export type Scores = {
+  [key: string]: number | string | Record<string, QuestionScore> | Record<string, number> | Sample[] | undefined;
+} & {
   questions?: Record<string, QuestionScore>;
+  se?: Record<string, number>;
   samples?: Sample[];
 };
 
@@ -256,6 +260,7 @@ export interface RunDetail {
       patience: number;
       pickBy: string;
       falseAlarmPercent?: number;
+      minGain?: number; // a check beats the best only by more than this, in the score's units (runs from before: 0)
       countFrom?: number; // where Keep training picked up: early stopping counts the checks after it
     };
     created: number;
@@ -283,9 +288,10 @@ export interface ExportStatus {
   error?: string | null;
 }
 
-// server/anvil/picking.py: one entry per validation check; best_step is the checkpoint that becomes the model.
+// server/anvil/picking.py: one entry per validation check; best_step is the checkpoint that becomes the model. se: one
+// standard error of the score, from the validation sample (checks from before it was worked out have none).
 export interface Leaderboard {
-  entries: { step: number; score: number | null; metric: string; direction: "max" | "min" }[];
+  entries: { step: number; score: number | null; metric: string; direction: "max" | "min"; se?: number }[];
   best_step: number | null;
 }
 

@@ -182,6 +182,11 @@ answers the same three validation prompts, shown next to the replies the data gi
 - **Stop after no gain for** N checks ends training early once the score hasn't improved for N checks in a row
   (0 turns this off). Only the checks after the warmup count, and for a new Clef head after its steps alone too:
   until then the scores say little about where the model is going.
+- **Least gain that counts**: a check beats the best only by more than this, in the score's own units (0, the
+  default, counts any rise, as Hugging Face's and Keras's early stopping do by default). Every score comes with ± one
+  standard error, from a bootstrap over the validation rows; the run page shows it beside the picked score. Two checks
+  within about one of each other are a toss-up, so a gain of that size is noise: set the least gain to about the ±
+  and the run neither stops late for a drift nor picks a checkpoint for a gain that wasn't one.
 - **Keep training**, on a run that stopped early before its last step, carries on from the newest checkpoint. It asks
   again: stop early after N more checks without a gain, or train to the last step.
 - When training ends, the best checkpoint becomes the model and is scored once on the test set (up to 5,000 rows).
@@ -234,4 +239,5 @@ by that follows the data (with Overall for mixed data), and the catch rate's fal
 a pass over what limits the quality of the fine-tunes: every token weighs the same across a step's batches and cards,
 full fine-tuning keeps fp32 weights, chat replies that echo the user are learned from the right turn, text starts with
 the model's BOS token, and the run page shows the gradient norm, the learning rate, what the run has seen, token
-accuracy and sample replies.
+accuracy and sample replies. Pick best by follows the field's recipe: a least gain that counts, and every score with
+its standard error.

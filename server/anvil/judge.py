@@ -51,7 +51,7 @@ def run(cfg: dict, run_dir: Path, report: train.Reporter) -> None:
         metrics = train.with_samples(metrics, task.samples(model, val_items, val_parsed, autocast))
         report.metric({"type": "eval", "step": step, "by": "judge", **metrics})
         with picking.updating(run_dir) as board:
-            picking.record(board, step, metrics, pick_by)
+            picking.record(board, step, metrics, pick_by, picking.min_gain(cfg))
         train.prune(run_dir, picking.keep(board, keep_best, [train.step_of(p) for p in train.checkpoints(run_dir)]))
 
     judged = {e["step"] for e in picking.load(run_dir)["entries"]}

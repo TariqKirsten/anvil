@@ -4,6 +4,11 @@ Each validation check adds a line to the run's leaderboard.json. The "pick best 
 them. Step 0 (the model before training) is shown as the starting point but never picked: the finished model is always
 a trained checkpoint. Validation picks; the test split is only scored once, at the end, with the picked checkpoint, so
 the reported test number isn't flattered by the picking.
+
+This is the usual recipe (Hugging Face's metric_for_best_model with load_best_model_at_end, Keras's and Lightning's
+EarlyStopping and ModelCheckpoint): a monitored metric with a direction, the best checkpoint kept and loaded at the end,
+patience counted in checks without a gain, and a least gain that counts (their min_delta / early_stopping_threshold),
+which anvil calls minGain.
 """
 
 from __future__ import annotations
@@ -84,20 +89,29 @@ def updating(run_dir: Path):
         save(run_dir, board)
 
 
-def record(board: dict, step: int, metrics: dict, pick_by: str) -> dict:
-    """Add a check. Returns the updated board, whose best_step is the best check so far (never step 0)."""
+def record(board: dict, step: int, metrics: dict, pick_by: str, min_gain: float = 0.0) -> dict:
+    """Add a check. Returns the updated board, whose best_step is the best check so far (never step 0).
+
+    A check becomes the best only by beating the best so far by more than min_gain (the "least gain that counts"
+    setting, in the score's own units; 0 counts any rise): a smaller rise is within what the validation sample's
+    noise can do, so it neither moves the pick nor starts the early-stopping count again. The entry keeps the score's
+    standard error (se) when the check worked one out, so the run page can show how sure the score is."""
     key, direction = metric_of(pick_by)
     value = score(metrics, pick_by)
     if value is None:  # the chosen metric doesn't exist for this data: rank by validation loss instead
         key, direction, value = "val_loss", "min", metrics.get("val_loss")
+    entry = {"step": step, "score": value, "metric": key, "direction": direction}
+    se = (metrics.get("se") or {}).get(key)
+    if se is not None:
+        entry["se"] = se
     board["entries"] = [e for e in board["entries"] if e["step"] != step]
-    board["entries"].append({"step": step, "score": value, "metric": key, "direction": direction})
+    board["entries"].append(entry)
     board["entries"].sort(key=lambda e: e["step"])
     if step == 0:
         return board
     top = best(board)
     improved = top is None or (value is not None and top["score"] is not None and (
-        value > top["score"] if direction == "max" else value < top["score"]))
+        value > top["score"] + min_gain if direction == "max" else value < top["score"] - min_gain))
     if improved:
         board["best_step"] = step
     return board
@@ -129,13 +143,19 @@ def should_stop(board: dict, patience: int, after: int = 0) -> bool:
     return patience > 0 and board.get("best_step") is not None and checks_without_gain(board, after) >= patience
 
 
-def stop_reason(board: dict, patience: int, after: int = 0) -> str | None:
+def stop_reason(board: dict, patience: int, after: int = 0, min_gain: float = 0.0) -> str | None:
     """Why training should stop early, or None to carry on. Read from the live leaderboard, so a better check that
     arrives later cancels it. Only the checks after step `after` count: before it the model is still warming up."""
     if not should_stop(board, patience, after):
         return None
     metric = best(board)["metric"]
-    return f"{LABELS.get(metric, metric)} didn't improve for {patience} checks in a row"
+    by = f" by at least {min_gain:g}" if min_gain > 0 else ""
+    return f"{LABELS.get(metric, metric)} didn't improve{by} for {patience} checks in a row"
+
+
+def min_gain(cfg: dict) -> float:
+    """The run's least gain that counts (0 for runs from before the setting: any rise counted)."""
+    return float(cfg["checkpoints"].get("minGain") or 0)
 
 
 def keep(board: dict, keep_best: int, steps: list[int]) -> set[int]:

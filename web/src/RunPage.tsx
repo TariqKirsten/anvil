@@ -560,7 +560,10 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
                       {m.step === best && <Badge tone="ok">best</Badge>}
                     </td>
                     {columns.map(([key]) => (
-                      <td key={key} className={key === metric ? "picked" : undefined}>{num(m[key], key === "perplexity" ? 2 : 3)}</td>
+                      <td key={key} className={key === metric ? "picked" : undefined}>
+                        {num(m[key], key === "perplexity" ? 2 : 3)}
+                        {key === metric && typeof m.se?.[key] === "number" && <span className="se"> ±{num(m.se[key])}</span>}
+                      </td>
                     ))}
                   </tr>
                 ))}
@@ -569,7 +572,8 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           </div>
           <p className="hint">
             Up to 2,000 rows of the validation set{decision && cfg.method !== "clef" && "; every question is asked with its options in both orders and averaged"}. The
-            highlighted column picks the best checkpoint.
+            highlighted column picks the best checkpoint
+            {evals.some((m) => typeof m.se?.[metric] === "number") && "; ± is one standard error of its score, from a bootstrap over the rows, so two checks within about one of each other are a toss-up"}.
             {decision && " The averages are over the questions of each type; By question has each one's own."}
             {has("auroc") && ` Catch rate: the share of real yes cases caught when only ${allowed} of no cases may be flagged. False alarms: the share of no cases flagged at 50%.`}
             {has("mae") && " MAE: how many levels off a score question's answer is, on average."}
@@ -603,8 +607,9 @@ export function RunPage({ id, onLogout }: { id: string; onLogout: () => void }) 
           Saved every {cfg.checkpoints.every.toLocaleString()} steps. Kept: the best {cfg.checkpoints.keepBest ?? 3}, the
           newest (Resume starts there), and any not checked yet.{" "}
           {cfg.checkpoints.patience
-            ? `Training stops early if the ${METRIC_LABEL[metric] ?? metric} doesn't improve for ${cfg.checkpoints.patience} checks in a row${countNote}.`
+            ? `Training stops early if the ${METRIC_LABEL[metric] ?? metric} doesn't improve${cfg.checkpoints.minGain ? ` by at least ${cfg.checkpoints.minGain}` : ""} for ${cfg.checkpoints.patience} checks in a row${countNote}.`
             : "Early stopping is off."}
+          {!!cfg.checkpoints.minGain && !cfg.checkpoints.patience && ` A check beats the best only by at least ${cfg.checkpoints.minGain}.`}
         </p>
       </Section>
 

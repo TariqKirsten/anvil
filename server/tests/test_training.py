@@ -626,6 +626,8 @@ def test_a_running_run_or_its_judge_blocks_deleting(run_settings):
     ({"trainingType": "qlora"}, "QLoRA"),
     ({"trainAs": "lm"}, "needs chat"),
     ({"hyper": {**FORM["hyper"], "learningRate": "fast"}}, "isn't a number"),
+    ({"checkpoints": {**FORM["checkpoints"], "minGain": -1}}, "least gain that counts"),
+    ({"checkpoints": {**FORM["checkpoints"], "minGain": "lots"}}, "least gain that counts"),
 ])
 def test_unsupported_runs_say_why(run_settings, change, reason):
     with pytest.raises(ValueError, match=reason):
@@ -753,6 +755,43 @@ def test_picking_rules():
     assert picking.problem("overall", {"noul"}) is None and picking.problem("auroc", None) is None
     assert "needs choice questions" in picking.problem("macro_f1", {"noul", "score"})
     assert "Unknown" in picking.problem("vibes", {"noul"})
+    # The least gain that counts: a rise within it is neither a new best nor a fresh start for the no-gain count.
+    board = {"entries": [], "best_step": None}
+    for step, auroc in [(10, 0.70), (20, 0.705), (30, 0.709), (40, 0.72)]:
+        board = picking.record(board, step, {"auroc": auroc, "se": {"auroc": 0.02}}, "auroc", min_gain=0.01)
+    assert board["best_step"] == 40 and picking.checks_without_gain(board) == 0
+    assert board["entries"][0]["se"] == 0.02 and "se" not in picking.record(board, 50, {"auroc": 0.5}, "auroc")["entries"][-1]
+    board = picking.record(board, 60, {"auroc": 0.725}, "auroc", min_gain=0.01)
+    assert board["best_step"] == 40 and picking.checks_without_gain(board) == 2  # 0.725 is within 0.01 of 0.72
+    assert picking.stop_reason(board, 2, min_gain=0.01) == "Mean AUROC didn't improve by at least 0.01 for 2 checks in a row"
+    assert picking.min_gain({"checkpoints": {}}) == 0 and picking.min_gain({"checkpoints": {"minGain": 0.005}}) == 0.005
+
+
+def test_scores_come_with_their_standard_errors():
+    rng = np.random.default_rng(1)
+    gold = rng.random(400) < 0.3
+    yes = np.clip(gold * 0.4 + rng.random(400) * 0.6, 0, 1)
+    out = {"loss": list(-np.log(np.where(gold, yes, 1 - yes))), "correct": list((yes >= 0.5) == gold),
+           "confidence": list(np.maximum(yes, 1 - yes)), "questions": {}}
+    tasks.note(out["questions"], "rude", "noul", yes=yes.tolist(), gold=gold.tolist())
+    out["questions"][("rude", "noul")] = {"yes": yes.tolist(), "gold": gold.tolist()}
+    picked = rng.choice(["a", "b", "c"], 60)
+    out["questions"][("kind", "choice")] = {"picked": picked.tolist(), "gold": rng.choice(["a", "b", "c"], 60).tolist()}
+    out["loss"] += [0.5] * 60
+    out["correct"] += [True] * 60
+    out["confidence"] += [0.9] * 60
+    scores = tasks.decision_metrics(out, 460, 0.01)
+    se = scores["se"]
+    assert {"val_loss", "accuracy", "ece", "auroc", "catch_rate", "false_alarms", "macro_f1", "overall"} <= set(se)
+    assert 0.01 < se["auroc"] < 0.06 and 0.02 < se["macro_f1"] < 0.12 and se["val_loss"] > 0
+    assert se == tasks.standard_errors(out, 0.01)  # seeded: the trainer and the judge get the same numbers
+    few = {"loss": [0.1], "correct": [True], "confidence": [0.9], "questions": {}}
+    assert tasks.decision_metrics(few, 1, 0.01)["se"] == {}
+    rows = {"rows": [[2.0, 4, 1], [1.0, 2, 1], [6.0, 4, 0]] * 10}
+    lm = tasks.LanguageModel.metrics(rows, 30)
+    assert lm["val_loss"] == pytest.approx(9 / 10) and lm["token_accuracy"] == pytest.approx(0.2)
+    assert 0 < lm["se"]["val_loss"] < 0.5 and 0 < lm["se"]["token_accuracy"] < 0.2
+    assert tasks.LanguageModel.combine([{"rows": [[1.0, 1, 1]]}, {"rows": [[2.0, 2, 0]]}]) == {"rows": [[1.0, 1, 1], [2.0, 2, 0]]}
 
 
 def test_catch_rate_and_calibration():

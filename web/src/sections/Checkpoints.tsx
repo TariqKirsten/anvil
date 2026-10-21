@@ -11,7 +11,7 @@ export function CheckpointSection({ form, update, errors, types }: SectionProps 
   const options = pickByOptions(form.trainAs, types, c.falseAlarmPercent);
   const setC = (change: Partial<Checkpoints>) =>
     update((f) => ({ ...f, checkpoints: { ...f.checkpoints, ...change } }));
-  const num = (key: "every" | "keepBest" | "patience" | "falseAlarmPercent", label: string, step: number,
+  const num = (key: "every" | "keepBest" | "patience" | "falseAlarmPercent" | "minGain", label: string, step: number,
     hint?: string) => (
     <Field id={key} label={label} error={errors[key]} hint={hint}>
       <NumberInput id={key} value={c[key]} step={step} invalid={!!errors[key]} onChange={(v) => setC({ [key]: v })} />
@@ -32,6 +32,8 @@ export function CheckpointSection({ form, update, errors, types }: SectionProps 
         {num("every", "Save every (steps)", 50)}
         {num("keepBest", "Keep best", 1)}
         {num("patience", "Stop after no gain for", 1, c.patience === 0 ? "never stops early" : "checks in a row")}
+        {num("minGain", "Least gain that counts", 0.001,
+          c.minGain === 0 || Number.isNaN(c.minGain) ? "any rise counts" : "in the score's own units")}
         <Field id="pickBy" label="Pick best by" className="wide">
           <select id="pickBy" value={options.some((o) => o.value === c.pickBy) ? c.pickBy : options[0].value}
             onChange={(e) => setC({ pickBy: e.target.value })}>
@@ -48,7 +50,9 @@ export function CheckpointSection({ form, update, errors, types }: SectionProps 
       <p className="hint">
         Each checkpoint is scored on the validation set, and the best one becomes the model. A free GPU you didn't
         tick does the checks, so training doesn't pause for them; otherwise the training cards pause briefly and
-        check together. The test set is used once, at the end, on the best checkpoint.
+        check together. The test set is used once, at the end, on the best checkpoint. A check beats the best only by
+        more than the least gain that counts, and only then does the no-gain count start again: the run page shows
+        each score with ± its noise, and a gain within that is a toss-up.
       </p>
       {form.trainAs === "decision" && (
         <p className="hint">

@@ -1699,6 +1699,13 @@ h1 {
   color: var(--accent-text);
 }
 
+/* One standard error of the picked score, beside it: small and quiet, since the score is what's read. */
+.table td .se {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .table .best-row td {
   font-weight: 600;
 }

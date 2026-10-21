@@ -44,7 +44,8 @@ export interface FormState {
     maxSteps: number;
   };
   // falseAlarmPercent: the catch rate counts the yes cases caught when at most this share of no cases is flagged.
-  checkpoints: { every: number; keepBest: number; patience: number; pickBy: string; falseAlarmPercent: number };
+  // minGain: a check beats the best only by more than this (in the score's own units; 0 counts any rise).
+  checkpoints: { every: number; keepBest: number; patience: number; pickBy: string; falseAlarmPercent: number; minGain: number };
 }
 
 // What each section gets: the form, and one way to change it.
@@ -126,7 +127,7 @@ export const DEFAULTS: FormState = {
     gradCheckpointing: true,
     maxSteps: 0,
   },
-  checkpoints: { every: 500, keepBest: 3, patience: 3, pickBy: "overall", falseAlarmPercent: 1 },
+  checkpoints: { every: 500, keepBest: 3, patience: 3, pickBy: "overall", falseAlarmPercent: 1, minGain: 0 },
 };
 
 const KEY = "anvil.finetune.v1";
@@ -213,6 +214,7 @@ export function validate(form: FormState): Errors {
   if (!wholeNumber(c.patience, 0, 1000)) errors.patience = "Use 0 (never stop early) or a whole number.";
   if (form.trainAs === "decision" && !(c.falseAlarmPercent >= 0 && c.falseAlarmPercent <= 50))
     errors.falseAlarmPercent = "Use 0 to 50%.";
+  if (!(c.minGain >= 0 && c.minGain <= 10)) errors.minGain = "Use 0 (any rise counts) or a number up to 10.";
   if (!form.name.trim()) errors.name = "Give the run a name.";
   return errors;
 }

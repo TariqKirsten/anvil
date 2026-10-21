@@ -474,7 +474,7 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
             return
         report.metric({"type": "eval", "step": at_step, "by": "trainer", **metrics})
         with picking.updating(run_dir) as board:
-            picking.record(board, at_step, metrics, pick_by)
+            picking.record(board, at_step, metrics, pick_by, picking.min_gain(cfg))
         report.update(stage=training(), last_eval={"step": at_step, **without_samples(metrics)},
                       best_step=board.get("best_step"))
 
@@ -490,7 +490,8 @@ def train(cfg: dict, run_dir: Path, report: Reporter, resume: bool, group) -> No
         report.update(stage=training(), saving_since=None, checkpoints=[p.name for p in checkpoints(run_dir)])
 
     def early_stop_reason() -> str | None:
-        return picking.stop_reason(picking.load(run_dir) if judged_elsewhere else board, patience, count_after)
+        return picking.stop_reason(picking.load(run_dir) if judged_elsewhere else board, patience, count_after,
+                                   picking.min_gain(cfg))
 
     every = int(ck["every"])
     log_every = max(1, min(50, total // 200))
@@ -685,7 +686,7 @@ def finish(cfg, run_dir: Path, report: Reporter, model, tok, task, step: int, ea
             metrics = task.evaluate(model, val_items, val_parsed, batch, autocast)
             report.metric({"type": "eval", "step": step_of(path), "by": "trainer", **metrics})
             with picking.updating(run_dir) as board:
-                picking.record(board, step_of(path), metrics, pick_by)
+                picking.record(board, step_of(path), metrics, pick_by, picking.min_gain(cfg))
 
     best = board.get("best_step") or step
     if (best != step or swapped) and checkpoint_dir(run_dir, best).exists():

@@ -198,6 +198,7 @@ def _check_picking(checkpoints: dict, train_as: str, report: dict) -> dict:
     """The checkpoint settings, once "pick best by" is known to work for the data (a language model is always picked
     by its validation loss) and the catch rate's false alarm allowance is a sensible percent."""
     checkpoints = dict(checkpoints)
+    _check_gain(checkpoints)
     if train_as == "lm":
         checkpoints["pickBy"] = "val_loss"
         return checkpoints
@@ -210,6 +211,14 @@ def _check_picking(checkpoints: dict, train_as: str, report: dict) -> dict:
     if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not 0 <= percent <= 50:
         raise ValueError("The false alarms allowed for the catch rate must be 0 to 50%.")
     return checkpoints
+
+
+def _check_gain(checkpoints: dict) -> None:
+    """The least gain that counts: a score's own units, so a fraction of 1 for every score but the mean absolute
+    error (levels), which gets room up to 10."""
+    gain = checkpoints.get("minGain", 0)
+    if isinstance(gain, bool) or not isinstance(gain, (int, float)) or not 0 <= gain <= 10:
+        raise ValueError("The least gain that counts must be a number from 0 to 10.")
 
 
 def create(form: dict, prepare: dict, token: str | None) -> str:
