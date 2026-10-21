@@ -156,7 +156,9 @@ check the model answers the same three validation prompts, shown next to the rep
   model first.
 - Letters models become ordinary GGUFs (prompt them the letters way). Clef models become decision GGUFs with their
   head: llama-server answers SystemOne requests with them at `/v1/systemone`; give it batch sizes that fit your longest
-  input (`-c 8192 -b 8192 -ub 8192`), since a decision model reads a whole input in one batch.
+  input (`-c 8192 -b 8192 -ub 8192`), since a decision model reads a whole input in one batch. `DECISION-MODELS.md`
+  walks through one, decision-0.8B: starting the server, a request and its answers, the questions it was trained on,
+  and loading it in Python without llama.cpp.
 - Checked on 60 validation questions each: BF16, Q8_0 and Q4_K_M files of a letters model, and a Q8_0 Clef file, all
   gave the same answers as the model they came from (probabilities within 0.001 to 0.013 on average).
 
