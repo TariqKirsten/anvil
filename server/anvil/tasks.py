@@ -204,7 +204,8 @@ class DecisionLetters(Decisions, NoHead):
                 if len(options(question)) > len(LETTERS):
                     raise ValueError(f"Question '{name}' has more than {len(LETTERS)} options, which the letters "
                                      "method can't show. The Clef head (step 6) can.")
-                items.append(Item(i, name))
+                if parsed["gold"][i].get(name) is not None:  # a null answer: asked without scoring, so not an item
+                    items.append(Item(i, name))
         return items, parsed
 
     def lengths(self, items: list[Item], parsed: dict) -> np.ndarray:
@@ -730,7 +731,11 @@ class DecisionClef(Decisions):
     """Each row (its state and every question with its allowed options) becomes one prompt, built by Clef's own
     encode_record. The head reads the model's hidden states over each question and option, and the option words'
     output embeddings, and gives one score per option. The loss is cross-entropy against the gold answer, one term per
-    question. An item is a row, since one pass answers all of its questions."""
+    question. An item is a row, since one pass answers all of its questions.
+
+    A question whose answer is null is in the prompt but not scored. A row can then ask every question, the way the
+    model will be asked, while its labels cover only some of them: which questions a row asks says nothing about
+    its answers."""
 
     def __init__(self, tokenizer, max_length: int, head: torch.nn.Module, config: dict):
         from .vendor.clef import joint_schema_model as clef
@@ -805,13 +810,15 @@ class DecisionClef(Decisions):
             record = self.clef.encode_record(self.tok, {"state": parsed["state"][i], "questions": questions},
                                              max_length=self.max_length)
             records.append(record)
-            targets.append([torch.tensor(clef_target(questions[q.question_id], parsed["gold"][i][q.question_id],
-                                                     q.option_ids)) for q in record.questions])
+            gold = parsed["gold"][i]
+            targets.append([None if gold.get(q.question_id) is None else  # asked, not scored
+                            torch.tensor(clef_target(questions[q.question_id], gold[q.question_id], q.option_ids))
+                            for q in record.questions])
         ids = [list(r.input_ids) for r in records]
         input_ids = pad(ids, self.tok.pad_token_id or 0)
         return {"input_ids": input_ids, "lengths": torch.tensor([len(x) for x in ids]),
                 "records": records, "targets": targets,
-                "count": sum(len(r.questions) for r in records),  # the loss is a sum over questions
+                "count": sum(t is not None for row in targets for t in row),  # the loss is a sum over scored questions
                 "tokens": sum(len(x) for x in ids), "padded": input_ids.numel(),
                 # encode_record cuts the state to fit, without saying so: a cut prompt is exactly max length long
                 "truncated": sum(len(x) >= self.max_length for x in ids)}
@@ -826,10 +833,12 @@ class DecisionClef(Decisions):
         return self.head(hidden_states(model, ids), ids, mask, batch["records"], output_embeddings)
 
     def loss_sum(self, model, batch: dict) -> torch.Tensor:
-        """Cross-entropy against the gold answers, added up over every question of every row."""
+        """Cross-entropy against the gold answers, added up over every scored question of every row."""
         total = None
         for record_logits, record_targets in zip(self.logits(model, batch), batch["targets"]):
             for scores, t in zip(record_logits, record_targets):
+                if t is None:
+                    continue
                 term = -(t.to(scores.device) * torch.log_softmax(scores.float(), dim=-1)).sum()
                 total = term if total is None else total + term
         return total
@@ -848,6 +857,8 @@ class DecisionClef(Decisions):
                 logits = self.logits(model, batch)
             for record, record_logits, record_targets in zip(batch["records"], logits, batch["targets"]):
                 for question, scores, t in zip(record.questions, record_logits, record_targets):
+                    if t is None:
+                        continue
                     p = torch.softmax(scores.float(), dim=-1).cpu()
                     loss = float(-(t * torch.log(p.clamp_min(1e-9))).sum())
                     losses.append(loss)

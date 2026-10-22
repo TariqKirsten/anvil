@@ -93,6 +93,27 @@ def test_a_clef_run_trains_its_head_and_saves_it_like_a_clef_release(tmp_path, t
         assert torch.allclose(a, b, atol=1e-5)
 
 
+def test_a_question_with_a_null_answer_is_asked_but_not_scored(tiny_model):
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tok, model = AutoTokenizer.from_pretrained(tiny_model), AutoModelForCausalLM.from_pretrained(tiny_model)
+    task = tasks.DecisionClef(tok, 1024, clef.JointSchemaHead(**tasks.clef_head_config(32)), tasks.clef_head_config(32))
+    questions = {"rude": {"type": "noul", "instructions": "Is it rude?"},
+                 "spam": {"type": "noul", "instructions": "Is it spam?"}}
+    parsed = {"state": [{"message": "buy now"}] * 2, "questions": [questions] * 2,
+              "gold": [{"rude": False, "spam": True}, {"rude": None, "spam": True}]}
+    both, one = task.collate([0], parsed), task.collate([1], parsed)
+    assert both["input_ids"].equal(one["input_ids"])  # the same prompt: both questions are asked
+    assert (both["count"], one["count"]) == (2, 1)
+    with torch.no_grad():
+        spam_only = task.loss_sum(model, one)
+        rude, spam = (-(t * torch.log_softmax(s.float(), dim=-1)).sum()
+                      for s, t in zip(task.logits(model, both)[0], both["targets"][0]))
+    assert torch.allclose(spam_only, spam) and not torch.allclose(spam_only, rude + spam)
+    scored = task.outputs(model, [1], parsed, 1, torch.no_grad)["questions"]
+    assert list(scored) == [("spam", "noul")]
+
+
 def test_a_new_head_trains_alone_first(tmp_path, tiny_model):
     data = prepared(tmp_path, decision_rows(80), decision_rows(12, seed=1))
     cfg = clef_config(tiny_model, data, maxSteps=20, every=2, warmupPercent=10)

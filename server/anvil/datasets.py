@@ -148,7 +148,9 @@ def _is_int(value) -> bool:
 def check_decision(state, questions, gold) -> tuple[str, str, str]:
     """(input, output, label) of a decision row. Raises ValueError with a plain reason when it breaks the format.
 
-    The rules are the ones Unsloth Studio and System One apply."""
+    The rules are the ones Unsloth Studio and System One apply, plus one of anvil's: an answer may be null, for a
+    question the row asks without scoring it (a Clef prompt that asks every question while the row's label covers only
+    some). At least one question needs an answer."""
     try:
         state, questions, gold = _value(state), _value(questions), _value(gold)
     except (ValueError, TypeError):
@@ -170,6 +172,8 @@ def check_decision(state, questions, gold) -> tuple[str, str, str]:
         if name not in gold:
             raise ValueError(f"question '{name}' has no gold answer")
         answer = gold[name]
+        if answer is None:  # asked, not scored
+            continue
         if isinstance(answer, dict) and "label" in answer:  # a soft label: {"label": ..., "probabilities": {...}}
             answer = answer["label"]
         criteria = question.get("criteria")
@@ -188,6 +192,8 @@ def check_decision(state, questions, gold) -> tuple[str, str, str]:
                 raise ValueError(f"question '{name}' is a score, so its criteria must list 1 to 10 levels")
             if not _is_int(answer) or not 0 <= answer < len(criteria):
                 raise ValueError(f"question '{name}': the answer must be a level number from 0 to {len(criteria) - 1}")
+    if all(gold[name] is None for name in questions):
+        raise ValueError("every answer is null: at least one question needs an answer")
     return _flatten(state), _canonical(questions), _canonical(gold)
 
 

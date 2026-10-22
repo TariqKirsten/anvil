@@ -58,9 +58,11 @@ def test_good_decision_rows_pass():
     check_decision(*row("hi", SCORE, {"level": 2}).values())
     check_decision(*row("hi", NOUL, {"bad": {"label": True, "probabilities": {"true": 0.9, "false": 0.1}}}).values())
     check_decision({"message": "objects work too"}, NOUL, {"bad": True})
+    check_decision(*row("asked, not scored", {**NOUL, **CHOICE}, {"bad": True, "kind": None}).values())
 
 
 @pytest.mark.parametrize("questions, gold, reason", [
+    ({**NOUL, **CHOICE}, {"bad": None, "kind": None}, "at least one question needs an answer"),
     ({"bad": {"type": "yesno"}}, {"bad": True}, "needs the type"),
     ({"bad": {"type": "noul", "hint": "x"}}, {"bad": True}, "may only have"),
     (NOUL, {}, "has no gold answer"),
