@@ -259,6 +259,25 @@ def test_every_forward_pass_says_the_trainer_is_still_working(tmp_path, tiny_mod
     assert updated() > first
 
 
+def test_a_checkpoint_is_on_the_disk_before_it_takes_its_name(tmp_path, tiny_model, monkeypatch):
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    model = AutoModelForCausalLM.from_pretrained(tiny_model)
+    opt = torch.optim.AdamW(model.parameters())
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda step: 1.0)
+    synced, renamed = [], []
+    fsync, replace = os.fsync, os.replace
+    monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(Path(os.readlink(f"/proc/self/fd/{fd}"))), fsync(fd)))
+    monkeypatch.setattr(os, "replace", lambda src, dst: (renamed.append((Path(src), len(synced))), replace(src, dst)))
+
+    final = train.save_checkpoint(tmp_path.resolve(), model, None, opt, sched, {"step": 50}, lora=True)
+    tmp, at = next((src, n) for src, n in renamed if src.parent == final.parent)
+    written = {tmp / p.relative_to(final) for p in final.rglob("*")} | {tmp}
+    assert written <= set(synced[:at])  # every file and folder, before the rename
+    assert synced[at:] == [final.parent]  # and then the rename itself
+
+
 def poison(monkeypatch, change) -> None:
     """The task's loss for each training batch becomes change(call, loss, model); call counts the batches from 1."""
     from anvil import train

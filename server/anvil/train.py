@@ -370,9 +370,22 @@ def save_checkpoint(run_dir: Path, model, tok, opt, sched, state: dict, lora: bo
     torch.save({"optimizer": opt.state_dict(), "scheduler": sched.state_dict(),
                 "rng": {"python": random.getstate(), "torch": torch.get_rng_state()}}, tmp / "optimizer.pt")
     write_json(tmp / "state.json", state)  # written last: a checkpoint without it is incomplete
+    on_disk(tmp)  # before it takes its name, and before prune deletes the older ones
     shutil.rmtree(final, ignore_errors=True)
     os.replace(tmp, final)
+    on_disk(final.parent, files=False)  # the rename
     return final
+
+
+def on_disk(folder: Path, files: bool = True) -> None:
+    """Waits until what's written in folder is on the disk, not just in memory. Without it a power cut minutes after a
+    save can leave a checkpoint with all its names but its files cut short, and the older ones already deleted."""
+    for path in [*(sorted(folder.rglob("*")) if files else []), folder]:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 def prune(run_dir: Path, keep_steps: set[int]) -> None:
