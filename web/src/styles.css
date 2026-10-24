@@ -1684,6 +1684,10 @@ html:has(.chart-dialog[open]) {
     padding: 16px;
   }
 
+  .run-list {
+    padding: 4px 0; /* its rows have their own padding, as on a wide screen */
+  }
+
   .grid-checkpoints {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
