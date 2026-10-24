@@ -1,5 +1,6 @@
-// The docs: what the settings and numbers mean, for people who use anvil from the screen and never see its code. For
-// now, picking the best checkpoint and every score a check gives. #/docs/<id> scrolls to a part, such as one score.
+// The docs: what the settings and numbers mean, for people who use anvil from the screen and never see its code:
+// picking the best checkpoint, every score a check gives, and making data with pipelines. #/docs/<id> scrolls to a
+// part, such as one score.
 
 import { IconInfoCircle } from "@tabler/icons-react";
 import { useEffect, type ReactNode } from "react";
@@ -220,6 +221,18 @@ const GUIDE: [string, string, string][] = [
   ["A language model, where it's the only choice", "val-loss", "Validation loss"],
 ];
 
+// A pipeline's steps, for the Making data part.
+const PIPELINE_STEPS: [string, string][] = [
+  ["Model", "Connects to an OpenAI-compatible endpoint. Every line starts at one; another can plug into a step."],
+  ["Seed data", "Starts from rows you already have, a file or a Hugging Face split: its columns join the row."],
+  ["List", "Gives each row a value from a list you type, at random or taking turns: a topic, a mood, a language."],
+  ["Generate", "The model writes text from a prompt with {{ column }} slots: one row per reply, or several."],
+  ["Question", "A decision question (yes/no, choice or score), answered by the model or taken from a column."],
+  ["Filter", "Keeps only the rows that pass its rules: is, contains, matches, longer or shorter than, empty."],
+  ["Dedupe", "Drops copies and near-copies of a column, keeping the first."],
+  ["Save", "Ends a line: writes its rows as a decision, chat, prompt-and-completion or text dataset."],
+];
+
 export function Docs({ part, onLogout }: { part: string | null; onLogout: () => void }) {
   useEffect(() => {
     if (part) document.getElementById(part)?.scrollIntoView();
@@ -231,7 +244,10 @@ export function Docs({ part, onLogout }: { part: string | null; onLogout: () => 
       <div className="page-head">
         <h1>Docs</h1>
       </div>
-      <p className="doc-lead">How anvil picks the best checkpoint, and what each of its scores says about a fine-tune.</p>
+      <p className="doc-lead">
+        How anvil picks the best checkpoint, what each of its scores says about a fine-tune, and how{" "}
+        <a href="#/docs/pipelines">pipelines</a> make the data to train on.
+      </p>
 
       <Section title="Picking the best checkpoint">
         <div className="doc-text">
@@ -301,6 +317,93 @@ export function Docs({ part, onLogout }: { part: string | null; onLogout: () => 
             </dl>
           </article>
         ))}
+      </Section>
+
+      <Section title="Making data with pipelines">
+        <div className="doc-text" id="pipelines">
+          <p>
+            A pipeline makes a dataset with a model. Every line of steps starts at a <strong>Model</strong>, which talks
+            to an OpenAI-compatible endpoint such as radiance. Rows flow down the arrows: each step adds a column to
+            every row, or drops some, and a <strong>Save</strong> at the end of the line writes them as a dataset. It
+            lands in datasets/generated, where New run's data picker finds it, and <strong>Train on it</strong> on a
+            finished run takes you there with it chosen.
+          </p>
+          <p className="doc-callout">
+            <IconInfoCircle size={16} aria-hidden />
+            <span>
+              <strong>New to this? Start from a template.</strong> New pipeline on the Pipelines page offers six, each a
+              working pipeline with a note on every step about why it's there and what to try. Paste radiance's key
+              into the Model, then Preview.
+            </span>
+          </p>
+        </div>
+        <table className="doc-table doc-steps">
+          <thead>
+            <tr>
+              <th>Step</th>
+              <th>What it does</th>
+            </tr>
+          </thead>
+          <tbody>
+            {PIPELINE_STEPS.map(([step, what]) => (
+              <tr key={step}>
+                <td>{step}</td>
+                <td>{what}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <ul className="doc-list">
+          <li>
+            <strong>Reaching a model.</strong> anvil runs in a container, so this machine is host.docker.internal, not
+            localhost: radiance is http://host.docker.internal:8000/v1. The firewall lets containers through to port
+            8000 only; a server on another port needs a rule first. An API key is kept on the server and never shown
+            again, and Models at the same address share it, so it's pasted once. Thinking: Off asks Qwen, Gemma and DeepSeek servers not to think first, which is faster; leave it at
+            the server's default for OpenAI's own API. Requests at once is how many rows ask the model at the same
+            time: radiance's Gemma serves 32.
+          </li>
+          <li>
+            <strong>Another model for one step.</strong> A step uses the Model its line starts from, unless another is
+            plugged into its diamond handle with a dashed line. A Question takes a second opinion the same way: when
+            the model answers, both models must agree; when the answer comes from a column, it stands unless the
+            second model is sure it's wrong. Where they disagree, the answer is left out, or the row dropped.
+          </li>
+          <li>
+            <strong>Left out isn't dropped.</strong> A Question can leave its answer out (the model wasn't sure, the
+            models disagreed, or the column's value isn't an answer): the row still asks the question, without scoring
+            it. A decision row with no answer at all teaches nothing, so Save drops it.
+          </li>
+          <li>
+            <strong>Labels from the instructions.</strong> When a List tells the model what to write (a frustrated or
+            a calm message), that value can be the label: a Question that takes its answer from the column, mapping
+            each value to an answer. It's cheaper than asking, and a second opinion catches the messages that didn't
+            come out as asked.
+          </li>
+          <li>
+            <strong>Balance by</strong> on Save gives each value of a List's column, or each answer of a Question, an
+            equal share of the rows. For a List, only the values still short are made; for a Question, rows over a
+            share are dropped. Without it, whatever the model writes most fills the most.
+          </li>
+          <li>
+            <strong>Dedupe</strong> drops copies and near-copies by the rule Prepare data uses (70% of three-word runs
+            shared). Models repeat themselves, more so with few List values to vary: more topics or tones mean fewer
+            copies.
+          </li>
+          <li>
+            <strong>Preview, then Run.</strong> A preview makes 5 rows for each Save and shows each row's way through
+            the steps, with every prompt and reply; it makes no dataset. A run makes them all in the background and
+            writes rows as they come: Stop keeps what it made (as a dataset too), and Resume carries on from there. On
+            the canvas, each step counts the rows in, out and dropped; rows still on their way when every Save was full
+            are let go.
+          </li>
+          <li>
+            <strong>What a saved row holds.</strong> The dataset's own columns (state, questions and gold for a decision
+            model; messages; prompt and completion; or text), plus <code>source</code>, the pipeline and the List values
+            that made the row, and <code>meta</code>, every column as JSON. Prepare data's Keep together by source then
+            keeps each mix of List values on one side of the split, so the test set holds mixes the model never trained
+            on.
+          </li>
+        </ul>
       </Section>
 
       <Section title="Reading the scores">

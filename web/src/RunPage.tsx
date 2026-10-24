@@ -7,7 +7,7 @@ import { api } from "./api";
 import { ChartSection } from "./Chart";
 import { MoreStats, TrainingCharts } from "./Diagnostics";
 import { ExportSection } from "./ExportSection";
-import { bytes } from "./format";
+import { bytes, duration } from "./format";
 import { QuestionScores, questionsOf, type ScoredCheck } from "./QuestionScores";
 import { ResumeBox } from "./ResumeBox";
 import { METRIC_LABEL, STATE_LABEL, stateTone, when } from "./Runs";
@@ -51,15 +51,6 @@ function epochLine(st: RunDetail["status"]) {
   const current = Math.min(epochs, Math.floor(st.step / perEpoch) + 1);
   const pct = (100 * (st.step - (current - 1) * perEpoch)) / perEpoch;
   return `Epoch ${current} of ${epochs} · ${pct > 0 && pct < 1 ? pct.toFixed(1) : Math.round(pct)}% through it`;
-}
-
-function duration(seconds: number | null | undefined) {
-  if (seconds == null || !Number.isFinite(seconds)) return "–";
-  const s = Math.round(seconds);
-  if (s < 60) return `${s}s`;
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m} min`;
-  return `${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
 // An exponential moving average, so the trend shows through batch-to-batch noise.

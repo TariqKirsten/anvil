@@ -15,7 +15,7 @@ from fastapi.requests import Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from . import accounts, auth, config, datasets, folders, gpus, models_check, runs
+from . import accounts, auth, config, datasets, folders, gpus, llm, models_check, pipelines, runs, templates
 
 REPO_ID = re.compile(r"^[\w.-]+/[\w.-]+$")
 
@@ -25,6 +25,7 @@ async def lifespan(app: FastAPI):
     accounts.ensure_default_user()
     config.settings.uploads.mkdir(parents=True, exist_ok=True)
     config.settings.prepared.mkdir(parents=True, exist_ok=True)
+    config.settings.generated.mkdir(parents=True, exist_ok=True)
     # The first PyTorch probe takes a few seconds, so start it now instead of on the first page load.
     threading.Thread(target=gpus.probe, daemon=True).start()
     yield
@@ -494,6 +495,195 @@ def resume_run(run_id: str, request: Request, body: ResumeBody | None = None) ->
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- pipelines: making datasets with a model
+
+def _pipeline_failure(exc: Exception) -> HTTPException:
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(404, str(exc))
+    if isinstance(exc, llm.EndpointError):  # the endpoint's trouble, not anvil's
+        return HTTPException(502, str(exc))
+    return HTTPException(409, str(exc))
+
+
+@app.get("/api/pipeline-steps")
+def pipeline_steps() -> dict:
+    """Every step's settings with their defaults and the tests a Filter can use, so the screen makes a new step the
+    way the server would fill it in."""
+    return {"steps": pipelines.STEPS, "filter_ops": pipelines.FILTER_OPS, "leave_out": pipelines.LEAVE_OUT}
+
+
+class PipelineNew(BaseModel):
+    name: str = ""
+    template: str | None = None  # start from one of anvil.templates
+
+
+@app.get("/api/pipeline-templates")
+def pipeline_templates() -> dict:
+    return {"templates": templates.public()}
+
+
+@app.get("/api/pipelines")
+def list_pipelines() -> dict:
+    return {"pipelines": pipelines.list_pipelines()}
+
+
+@app.post("/api/pipelines")
+def create_pipeline(body: PipelineNew) -> dict:
+    try:
+        return {"pipeline": pipelines.detail(pipelines.create(body.name, body.template)["id"])}
+    except FileNotFoundError as exc:
+        raise _pipeline_failure(exc) from exc
+
+
+@app.get("/api/pipelines/{pipeline_id}")
+def get_pipeline(pipeline_id: str) -> dict:
+    try:
+        return {"pipeline": pipelines.detail(pipeline_id)}
+    except FileNotFoundError as exc:
+        raise _pipeline_failure(exc) from exc
+
+
+class PipelineBody(BaseModel):
+    name: str | None = None
+    nodes: list[dict] = []
+    edges: list[dict] = []
+
+
+@app.put("/api/pipelines/{pipeline_id}")
+def save_pipeline(pipeline_id: str, body: PipelineBody) -> dict:
+    """Save the graph as the screen has it (half drawn is fine). The answer says what still stops it from running."""
+    try:
+        data = pipelines.save(pipeline_id, body.model_dump(exclude_none=True))
+    except FileNotFoundError as exc:
+        raise _pipeline_failure(exc) from exc
+    return {"updated": data["updated"], "problems": pipelines.check(data)}
+
+
+@app.delete("/api/pipelines/{pipeline_id}")
+def delete_pipeline(pipeline_id: str) -> dict:
+    try:
+        pipelines.delete(pipeline_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise _pipeline_failure(exc) from exc
+    return {"ok": True}
+
+
+class KeyBody(BaseModel):
+    key: str
+
+
+@app.put("/api/pipelines/{pipeline_id}/keys/{node}")
+def save_pipeline_key(pipeline_id: str, node: str, body: KeyBody) -> dict:
+    if not body.key.strip():
+        raise HTTPException(400, "Paste the key first.")
+    try:
+        pipelines.set_key(pipeline_id, node, body.key.strip())
+    except FileNotFoundError as exc:
+        raise _pipeline_failure(exc) from exc
+    return {"ok": True}
+
+
+@app.delete("/api/pipelines/{pipeline_id}/keys/{node}")
+def remove_pipeline_key(pipeline_id: str, node: str) -> dict:
+    try:
+        pipelines.set_key(pipeline_id, node, None)
+    except FileNotFoundError as exc:
+        raise _pipeline_failure(exc) from exc
+    return {"ok": True}
+
+
+class ModelsBody(BaseModel):
+    base_url: str
+
+
+@app.post("/api/pipelines/{pipeline_id}/nodes/{node}/models")
+def endpoint_models(pipeline_id: str, node: str, body: ModelsBody) -> dict:
+    """The models a Model step's endpoint serves, asked with the step's key."""
+    try:
+        return pipelines.endpoint_models(pipeline_id, node, body.base_url)
+    except (FileNotFoundError, llm.EndpointError) as exc:
+        raise _pipeline_failure(exc) from exc
+
+
+class TryBody(BaseModel):
+    message: str
+    config: dict | None = None  # the Model step's settings as the screen has them, saved or not
+
+
+@app.post("/api/pipelines/{pipeline_id}/nodes/{node}/try")
+def try_pipeline_model(pipeline_id: str, node: str, body: TryBody) -> dict:
+    if not body.message.strip():
+        raise HTTPException(400, "Write a message to send.")
+    try:
+        return pipelines.try_model(pipeline_id, node, body.config, body.message)
+    except (FileNotFoundError, llm.EndpointError) as exc:
+        raise _pipeline_failure(exc) from exc
+
+
+class PipelineStart(BaseModel):
+    preview: bool = False
+
+
+@app.post("/api/pipelines/{pipeline_id}/runs")
+def start_pipeline(pipeline_id: str, body: PipelineStart, request: Request) -> dict:
+    try:
+        return {"id": pipelines.start(pipeline_id, body.preview, hf_token(request))}
+    except (FileNotFoundError, ValueError) as exc:
+        raise _pipeline_failure(exc) from exc
+
+
+@app.get("/api/pipelines/{pipeline_id}/runs/{run_id}")
+def pipeline_run(pipeline_id: str, run_id: str) -> dict:
+    try:
+        return {"run": pipelines.run_status(pipeline_id, run_id)}
+    except FileNotFoundError as exc:
+        raise _pipeline_failure(exc) from exc
+
+
+@app.get("/api/pipelines/{pipeline_id}/runs/{run_id}/rows")
+def pipeline_rows(pipeline_id: str, run_id: str, which: str, offset: int = 0, limit: int = 50) -> dict:
+    """A Save's rows (which = its step's id), the rows the steps dropped ("dropped"), or a preview's ("preview")."""
+    try:
+        return pipelines.rows(pipeline_id, run_id, which, max(0, offset), max(1, min(limit, 200)))
+    except FileNotFoundError as exc:
+        raise _pipeline_failure(exc) from exc
+
+
+@app.get("/api/pipelines/{pipeline_id}/runs/{run_id}/log")
+def pipeline_log(pipeline_id: str, run_id: str) -> dict:
+    try:
+        return {"log": pipelines.log(pipeline_id, run_id)}
+    except FileNotFoundError as exc:
+        raise _pipeline_failure(exc) from exc
+
+
+@app.post("/api/pipelines/{pipeline_id}/runs/{run_id}/stop")
+def stop_pipeline(pipeline_id: str, run_id: str) -> dict:
+    try:
+        pipelines.stop(pipeline_id, run_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise _pipeline_failure(exc) from exc
+    return {"ok": True}
+
+
+@app.post("/api/pipelines/{pipeline_id}/runs/{run_id}/resume")
+def resume_pipeline(pipeline_id: str, run_id: str, request: Request) -> dict:
+    try:
+        pipelines.resume(pipeline_id, run_id, hf_token(request))
+    except (FileNotFoundError, ValueError) as exc:
+        raise _pipeline_failure(exc) from exc
+    return {"ok": True}
+
+
+@app.delete("/api/pipelines/{pipeline_id}/runs/{run_id}")
+def delete_pipeline_run(pipeline_id: str, run_id: str) -> dict:
+    try:
+        pipelines.delete_run(pipeline_id, run_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise _pipeline_failure(exc) from exc
     return {"ok": True}
 
 

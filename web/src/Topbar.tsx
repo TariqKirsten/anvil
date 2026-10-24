@@ -6,9 +6,10 @@ import type { ReactNode } from "react";
 export function Topbar({ children, right, onLogout }: { children?: ReactNode; right?: ReactNode; onLogout: () => void }) {
   const here = window.location.hash;
   const runs = here.startsWith("#/runs");
+  const pipelines = here.startsWith("#/pipelines");
   const settings = here === "#/settings";
   const docs = here.startsWith("#/docs");
-  const finetune = !runs && !settings && !docs;
+  const finetune = !runs && !pipelines && !settings && !docs;
   return (
     <header className="topbar">
       <a className="brand" href="#/">
@@ -17,6 +18,7 @@ export function Topbar({ children, right, onLogout }: { children?: ReactNode; ri
       <nav className="nav" aria-label="Pages">
         <a href="#/" className={finetune ? "on" : ""} aria-current={finetune ? "page" : undefined}>New run</a>
         <a href="#/runs" className={runs ? "on" : ""} aria-current={runs ? "page" : undefined}>Runs</a>
+        <a href="#/pipelines" className={pipelines ? "on" : ""} aria-current={pipelines ? "page" : undefined}>Pipelines</a>
         <a href="#/docs" className={docs ? "on" : ""} aria-current={docs ? "page" : undefined}>Docs</a>
       </nav>
       {(children || right) && (

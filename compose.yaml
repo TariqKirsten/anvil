@@ -22,6 +22,8 @@ x-anvil: &anvil
   devices: [/dev/kfd, /dev/dri]
   ipc: host
   security_opt: [seccomp=unconfined]
+  # This machine, for a pipeline's Model step: an OpenAI-compatible server on it is http://host.docker.internal:<port>.
+  extra_hosts: ["host.docker.internal:host-gateway"]
   user: "${ANVIL_UID:-1000}:${ANVIL_GID:-1000}"
   env_file: .env
   environment:

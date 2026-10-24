@@ -35,7 +35,7 @@ Inside the container everything lives at fixed paths. `.env` says which host fol
 
 | Inside | `.env` | What |
 |---|---|---|
-| `/data` | `ANVIL_DATA` | Accounts, runs, uploaded datasets |
+| `/data` | `ANVIL_DATA` | Accounts, runs, uploaded datasets, pipelines and the datasets they make |
 | `/hf-cache` | `ANVIL_HF_CACHE` | The Hugging Face cache: downloaded models and datasets |
 | `/models` | `ANVIL_MODELS` | Local models you can pick from |
 | `/datasets` | `ANVIL_DATASETS` | Dataset files you can pick from (uploads go into `/data`) |
@@ -60,6 +60,45 @@ validation or test rows that share an input with train, and cuts whatever split 
 share an input stay on one side of the split. For decision data it also says which questions the validation set
 asks, by type, since that decides what the checks can score. The result is cached: preparing the same data with the
 same settings again is instant.
+
+## Pipelines: making data
+
+Pipelines (top left) make datasets with a model, drawn as steps on a canvas. Every line of steps starts at a **Model**,
+which talks to an OpenAI-compatible endpoint (vLLM, llama.cpp's server, radiance, Ollama, OpenAI). Rows flow down the
+arrows; each step adds a column to every row or drops some, and a **Save** at the end of a line writes them as a
+dataset in one of the formats above.
+
+| Step | What it does |
+|---|---|
+| Model | The endpoint's base URL, its API key (kept on the server, never shown again, and shared by Models at the same address), the model (Connect lists them), temperature, max tokens, thinking on or off, requests at once. Try it sends one message |
+| Seed data | Rows from a dataset you have: a file or a Hugging Face split; the columns you tick join each row |
+| List | A value for each row from a list you type, at random or taking turns |
+| Generate | The model writes text from a prompt with `{{ column }}` slots; asked for several, it answers with a JSON list and each item becomes a row |
+| Question | A decision question (yes/no, choice or score), answered by the model or taken from a column through a mapping |
+| Filter | Keeps the rows that pass its rules (is, contains, matches, longer or shorter than, empty), every rule or any |
+| Dedupe | Drops exact and near-copies of a column, by Prepare data's rule |
+| Save | Writes the rows (decision, chat, prompt and completion, or text), optionally balanced by a List's values or a Question's answers |
+
+- A step asks the Model its line starts from, unless another Model is plugged into its diamond handle (a dashed line).
+  A Question also takes a second opinion: two models' answers must agree; a column's answer stands unless the second
+  model is sure it's wrong. An answer left out is asked, not scored; a decision row with no answers is dropped.
+- Inside the container, this machine is `host.docker.internal` (compose maps it), so radiance is
+  `http://host.docker.internal:8000/v1`. A firewall that only lets containers reach some ports needs a rule for others.
+- The server checks the graph as it's saved (every change, a moment later) and marks what stops it from running, on
+  the step and under the setting.
+- **Preview** makes 5 rows for each Save and shows every row's way through the steps: the prompts, the replies, the
+  answers, and why rows were dropped. **Run** makes them all in its own process (`anvil.generate`), so a restart of
+  the server doesn't stop it; Stop keeps what it made and Resume carries on. Each step counts its rows in, out and
+  dropped, live on the canvas.
+- A run's datasets go to `ANVIL_DATA/datasets/generated/<name>-<run>.jsonl`, which New run's data picker lists, and
+  **Train on it** opens New run with one chosen. Every row also gets `source` (the pipeline and the List values that
+  made it, for Keep together by source) and `meta` (all its columns, as JSON).
+- **New pipeline** offers six templates (`server/anvil/templates.py`), each a working pipeline on radiance's Gemma with
+  a note on every step: labelling messages you have, writing a yes/no dataset from scratch, routing to a team (a choice
+  question), several questions per message, chat replies for a language model, and harmless Afrikaans and isiZulu
+  messages as hard negatives. The first labels a sample of 24 bank messages that comes with anvil.
+- **Delete** (the bin on a pipeline's row in the list, or Delete pipeline on its About tab) removes the pipeline and
+  its runs; the datasets it made stay. A pipeline with a run or a preview going can't be deleted.
 
 ## Training
 
@@ -266,9 +305,14 @@ fast kernels for linear-attention models such as Qwen3.5. On an R9700 that makes
 | `server/anvil/parallel.py` | Training on several GPUs at once: one process per card, gradients averaged every step |
 | `server/anvil/export.py` | Exporting a version of a run as GGUF with llama.cpp: merge, convert, quantize |
 | `server/anvil/upload.py` | Uploading a version of a run to Hugging Face: its weights and GGUF files, with model cards |
+| `server/anvil/pipelines.py` | Pipelines: the graph, its checks, storing them and their API keys, starting and stopping runs |
+| `server/anvil/generate.py` | A pipeline's run, in a process of its own: rows through the steps, in parallel, until each Save has its rows |
+| `server/anvil/llm.py` | Talking to an OpenAI-compatible endpoint: its models, and chat requests with retries |
+| `server/anvil/templates.py` | The pipelines New pipeline offers to start from; their sample data is in `samples/` |
 | `server/anvil/vendor/clef/` | Cloudflare's Clef reference code and licence (Apache-2.0), unmodified; see its `NOTICE.md` |
 | `server/tests/` | `docker compose exec -w /workspace/server dev python -m pytest` |
 | `web/src/` | The React screen: `Finetune.tsx`, `Runs.tsx`, `RunPage.tsx`, `Settings.tsx`, sections in `sections/` |
+| `web/src/pipeline/` | The pipeline editor (React Flow): the canvas, each step's settings, preview and runs; `Pipelines.tsx` lists them |
 
 ## Status
 
@@ -285,6 +329,8 @@ Built in steps:
    free unticked card.
 6. **The Clef head** (done): decision models the Clef way, next to letters, on one GPU or several, with the judge.
 7. **GGUF export** (done): the finished model or any kept checkpoint, as BF16 to Q4_K_M, for llama.cpp and the like.
+8. **Pipelines** (done): making datasets with a model on a canvas of steps, with preview, runs, balance, second
+   opinions and templates to start from.
 
 Since then: every question scored by its type (yes/no, choice, score) for any dataset, a By question table, Pick best
 by that follows the data (with Overall for mixed data), and the catch rate's false alarm allowance as a setting. Then:

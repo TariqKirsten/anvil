@@ -22,7 +22,8 @@ class Settings:
     reset_password: bool = field(default_factory=lambda: _env("ANVIL_RESET_PASSWORD") == "1")
     data: Path = field(default_factory=lambda: Path(_env("ANVIL_DATA", "~/.local/share/anvil")).expanduser())
     model_roots: tuple[Path, ...] = field(default_factory=lambda: _paths(_env("ANVIL_MODEL_ROOTS")))
-    # Where dataset files may be picked from. Uploads land in ANVIL_DATA/datasets/uploads, which is always included.
+    # Where dataset files may be picked from. Uploads land in ANVIL_DATA/datasets/uploads and pipelines' datasets in
+    # ANVIL_DATA/datasets/generated, which are always included.
     dataset_roots: tuple[Path, ...] = field(default_factory=lambda: _paths(_env("ANVIL_DATASET_ROOTS")))
     hf_token: str | None = field(default_factory=lambda: _env("HF_TOKEN") or None)
     # The built screen (npm run build). In development Vite serves it instead.
@@ -37,8 +38,13 @@ class Settings:
         return self.data / "datasets" / "prepared"
 
     @property
+    def generated(self) -> Path:
+        """Datasets that pipelines made (anvil.generate)."""
+        return self.data / "datasets" / "generated"
+
+    @property
     def all_dataset_roots(self) -> tuple[Path, ...]:
-        return (*self.dataset_roots, self.uploads)
+        return (*self.dataset_roots, self.uploads, self.generated)
 
 
 settings = Settings()

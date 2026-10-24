@@ -21,6 +21,7 @@
   --warn-bg: #fbefd8;
   --bad: #b3261e;
   --bad-bg: #fbe7e5;
+  --edge: #a9a8a1;
   --radius: 8px;
   --radius-lg: 12px;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
@@ -48,6 +49,7 @@
     --warn-bg: #342712;
     --bad: #f08a80;
     --bad-bg: #3a1c19;
+    --edge: #66655f;
   }
 }
 
@@ -1755,21 +1757,22 @@ html:has(.chart-dialog[open]) {
   .grid-checkpoints .wide {
     grid-column: auto;
   }
+}
 
-  /* Three pages leave no room for the name as well: the hammer alone links home, and the name stays for screen
-     readers. */
-  .brand-name {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
+/* A phone: the name and the account icons on top, the pages spread across a row of their own under them. */
+@media (max-width: 540px) {
+  .nav {
+    order: 1;
+    flex-basis: 100%;
+    justify-content: space-between;
+  }
+
+  .topbar-page {
+    order: 2;
   }
 }
 
-/* The smallest phones: a little less space between the hammer, the pages and the icons, and around each page, keeps
-   them on one row. */
+/* The smallest phones: a little less space between the pages and around each one keeps them on one row. */
 @media (max-width: 360px) {
   .topbar {
     column-gap: 8px;
@@ -2438,4 +2441,1265 @@ button:disabled {
 
 .sample-prompt {
   color: var(--text-2);
+}
+
+/* ---- pipelines: the steps on a canvas, and the picked step's settings beside it */
+
+.pipe-page {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+}
+
+.pipe-page > .topbar {
+  padding: 14px 20px;
+}
+
+.pipe-main {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  min-height: 0;
+}
+
+.pipe-canvas {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+}
+
+.pipe-side {
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface);
+}
+
+.page-note {
+  margin-top: 20px;
+}
+
+/* React Flow in anvil's colours, light and dark. */
+.pipe-canvas .react-flow {
+  --xy-background-color: var(--bg);
+  --xy-background-pattern-color: var(--border-strong);
+  --xy-edge-stroke: var(--edge);
+  --xy-edge-stroke-selected: var(--accent);
+  --xy-edge-stroke-width: 1.5;
+  --xy-connectionline-stroke: var(--accent);
+  --xy-controls-button-background-color: var(--surface);
+  --xy-controls-button-background-color-hover: var(--surface-2);
+  --xy-controls-button-color: var(--text-2);
+  --xy-controls-button-color-hover: var(--text);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-box-shadow: 0 0 0 1px var(--border-strong);
+  --xy-attribution-background-color: transparent;
+  --xy-selection-background-color: color-mix(in srgb, var(--accent) 10%, transparent);
+  --xy-selection-border: 1px dotted var(--accent);
+  --xy-handle-background-color: var(--surface);
+  --xy-handle-border-color: var(--muted);
+}
+
+.pipe-canvas .react-flow__controls {
+  overflow: hidden;
+  border-radius: var(--radius);
+}
+
+/* anvil's own button look stays off the canvas's zoom buttons. */
+.pipe-canvas .react-flow__controls-button {
+  width: 30px;
+  height: 30px;
+  padding: 6px;
+  border-radius: 0;
+}
+
+.pipe-canvas .react-flow__attribution a {
+  color: var(--muted);
+}
+
+.react-flow__edge.edge-model .react-flow__edge-path,
+.react-flow__edge.edge-check .react-flow__edge-path {
+  stroke: var(--accent);
+  stroke-dasharray: 5 4;
+  opacity: 0.75;
+}
+
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke-width: 2.5;
+  opacity: 1;
+}
+
+.canvas-tools {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.canvas-tools > button,
+.add-step > button {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.add-step {
+  position: relative;
+}
+
+.step-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  width: min(330px, calc(100vw - 48px));
+  max-height: min(70vh, 580px);
+  padding: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+
+.step-menu > .hint {
+  padding: 6px 8px 8px;
+}
+
+.step-menu-item {
+  width: 100%;
+  height: auto;
+  padding: 8px;
+  align-items: flex-start;
+  gap: 10px;
+  border: none;
+  background: none;
+  text-align: left;
+  white-space: normal;
+}
+
+.step-menu-item:hover,
+.step-menu-item:focus-visible {
+  background: var(--surface-2);
+}
+
+.step-menu-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.step-menu-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* A step on the canvas. */
+.step-node {
+  position: relative;
+  width: 248px;
+  padding: 10px 12px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  font-size: 12.5px;
+}
+
+.step-node.has-error {
+  border-color: var(--bad);
+}
+
+.step-node.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.step-icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+
+.step-icon.step-model,
+.step-model .step-icon {
+  background: var(--accent-bg);
+  color: var(--accent-text);
+}
+
+.step-icon.step-save,
+.step-save .step-icon {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.step-kind {
+  flex: 1;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.step-flag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.flag-error {
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+
+.flag-warn {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.step-title,
+.step-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-title {
+  margin-top: 8px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.step-detail {
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+/* Handles: round where rows go in and out, a diamond where a Model plugs in. Each reaches further than it looks, for
+   fingers. */
+.step-node .react-flow__handle {
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid var(--handle, var(--muted));
+  background: var(--surface);
+}
+
+.step-node .react-flow__handle::after {
+  position: absolute;
+  inset: -9px;
+  content: "";
+}
+
+.step-node .react-flow__handle:hover,
+.step-node .react-flow__handle.connectingto,
+.step-node .react-flow__handle.valid {
+  --handle: var(--accent);
+  background: var(--accent-bg);
+}
+
+.step-node .handle-plug {
+  border-style: dashed;
+  border-radius: 2px;
+  --handle: var(--accent);
+}
+
+/* Diamonds sit mostly outside the card, clear of its text. */
+.step-node .handle-plug.react-flow__handle-right {
+  transform: translate(70%, -50%) rotate(45deg);
+}
+
+.step-node .handle-plug.react-flow__handle-left {
+  transform: translate(-70%, -50%) rotate(45deg);
+}
+
+.plug-label {
+  position: absolute;
+  left: calc(100% + 12px);
+  color: var(--accent-text);
+  font-size: 11px;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+
+.step-node:hover .plug-label,
+.step-node.selected .plug-label {
+  opacity: 1;
+}
+
+/* The settings beside the canvas. */
+.side-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px 28px;
+}
+
+.side-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.side-head h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.side-body > h2 {
+  margin: 8px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.side-body > .back {
+  margin-top: 0;
+}
+
+.side-text {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.side-tips,
+.side-problems {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.side-tips {
+  color: var(--text-2);
+}
+
+.todo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.todo {
+  width: 100%;
+  height: auto;
+  min-height: 34px;
+  padding: 7px 10px;
+  align-items: flex-start;
+  font-size: 12.5px;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+}
+
+.todo svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.todo-error svg {
+  color: var(--bad);
+}
+
+.todo-warn svg {
+  color: var(--warn);
+}
+
+.todo:disabled {
+  cursor: default;
+}
+
+.todo-step {
+  font-weight: 600;
+}
+
+.side-end {
+  margin-top: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.side-end > button {
+  align-self: flex-start;
+}
+
+.step-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input-row > input,
+.input-row > select {
+  flex: 1;
+  min-width: 0;
+}
+
+.input-row > button {
+  flex: none;
+}
+
+.key-saved {
+  flex-wrap: wrap;
+}
+
+.key-saved .badge {
+  gap: 4px;
+}
+
+textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+textarea.mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+textarea[aria-invalid="true"],
+select[aria-invalid="true"] {
+  border-color: var(--bad);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.slot-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: -6px;
+}
+
+.slot-chips .chip {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.more {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.more summary {
+  color: var(--text-2);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.more[open] summary {
+  margin-bottom: 10px;
+}
+
+.more .field + .field {
+  margin-top: 12px;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.column-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  padding: 8px 10px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.check-name {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.chosen-source {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) 34px;
+  gap: 6px;
+}
+
+.level-row {
+  grid-template-columns: 18px minmax(0, 1fr) 34px;
+  align-items: center;
+}
+
+.level-number {
+  color: var(--muted);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+/* A rule: its column, its test and the remove button on top, the value below. */
+.rule-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 34px;
+  gap: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.rule-value {
+  grid-column: 1 / 3;
+}
+
+.add-row {
+  align-self: flex-start;
+  height: 30px;
+  font-size: 13px;
+}
+
+.mapping {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mapping-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 150px);
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.mapping-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.question-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 6px;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.second-opinion,
+.try-box {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.try-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.try-box .form-actions {
+  margin-top: 0;
+}
+
+.try-reply {
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-size: 13px;
+}
+
+.try-reply p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.try-reply .hint {
+  margin-top: 6px;
+  white-space: normal;
+}
+
+.asks-note {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.save-state {
+  justify-content: center;
+  min-width: 64px;
+}
+
+.picker-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100dvh - 32px);
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+}
+
+.picker-dialog::backdrop {
+  background: rgba(10, 10, 8, 0.5);
+}
+
+.picker-dialog .picker-panel {
+  margin: 0;
+  border: none;
+}
+
+@media (max-width: 1100px) {
+  .pipe-main {
+    grid-template-columns: minmax(0, 1fr) 340px;
+  }
+}
+
+/* A phone or a narrow window: the canvas on top, the settings under it. */
+@media (max-width: 760px) {
+  .pipe-page {
+    height: auto;
+  }
+
+  .pipe-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pipe-canvas {
+    height: 62vh;
+    min-height: 360px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .pipe-side {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 640px) {
+  .pipe-page > .topbar {
+    padding: 12px 16px;
+  }
+
+  .side-body {
+    padding: 14px 16px 28px;
+  }
+}
+
+/* ---- pipelines: preview and runs */
+
+.run-tools > button {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.side-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  gap: 2px;
+  padding: 10px 18px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.side-tabs button {
+  height: 34px;
+  margin-bottom: -1px;
+  padding: 0 12px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.side-tabs button.on {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.side-error {
+  margin: 12px 18px 0;
+}
+
+.start-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.start-row .hint {
+  flex: 1 1 160px;
+}
+
+.run-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.save-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.save-line {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.save-line-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.save-name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.save-count {
+  flex: none;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.share-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12.5px;
+}
+
+.side-body > h2 .count {
+  margin-left: 4px;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.row-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.row-card.outcome-dropped,
+.row-card.outcome-error {
+  background: var(--surface-2);
+}
+
+.row-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.row-chip {
+  max-width: 100%;
+  padding: 1px 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-text p {
+  margin: 1px 0 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.row-column {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.row-answers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+}
+
+.row-card .warn-text,
+.row-card .field-error {
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.row-trace summary,
+.trace-ask summary {
+  color: var(--text-2);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.trace {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.trace li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.trace-step {
+  font-weight: 500;
+}
+
+.trace-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.trace pre,
+.run-log {
+  max-height: 260px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.row-card .trace pre {
+  background: var(--bg);
+}
+
+.run-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.run-card.open {
+  border-color: var(--border-strong);
+}
+
+.run-card-head {
+  align-self: flex-start;
+  height: auto;
+  padding: 0;
+  gap: 6px;
+  border: none;
+  background: none;
+  font-weight: 500;
+}
+
+.run-card-head:hover {
+  background: none;
+  color: var(--accent-text);
+}
+
+.run-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.datasets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dataset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dataset-row code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dataset-row .train-on {
+  flex: none;
+}
+
+.run-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.step-table td:first-child {
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.reason-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.detail-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rows-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* A step's counts in the run being looked at, under its card's details. */
+.step-counts {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-strong);
+  color: var(--text-2);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-counts .dropped {
+  color: var(--warn);
+}
+
+/* A phone: the steps' request counts give way, so the table fits without scrolling. */
+@media (max-width: 480px) {
+  .step-table th:nth-child(5),
+  .step-table td:nth-child(5) {
+    display: none;
+  }
+}
+
+/* ---- pipelines: notes, and the templates to start from */
+
+.note-box,
+.note-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.note-box {
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--accent-bg);
+  color: var(--text);
+}
+
+.note-text {
+  color: var(--text-2);
+}
+
+.note-box p,
+.note-text p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.note-box button.link,
+.note-text button.link,
+.add-note {
+  font-size: 12.5px;
+}
+
+.add-note {
+  align-self: flex-start;
+  gap: 6px;
+}
+
+.note-edit textarea {
+  font-size: 13px;
+}
+
+.note-edit .form-actions {
+  margin-top: 6px;
+}
+
+/* A pipeline in the list: the row opens it, the bin beside it asks in a box under the row before deleting it. The
+   bin's column has a fixed width, so the progress bars still line up when a running pipeline has no bin. */
+.pipeline-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  align-items: center;
+  padding-right: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.pipeline-row:last-child {
+  border-bottom: none;
+}
+
+.pipeline-row:hover {
+  background: var(--surface-2);
+}
+
+.pipeline-row > .run-row {
+  padding-right: 16px;
+  border-bottom: none;
+}
+
+button.row-bin {
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+}
+
+button.row-bin:hover,
+button.row-bin[aria-expanded="true"] {
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+
+.pipeline-row > .confirm-box {
+  grid-column: 1 / -1;
+  margin: 0 0 12px 20px;
+}
+
+.confirm-box .field-error {
+  margin: 10px 0 0;
+}
+
+/* A phone: the bin goes down beside the newest run, so the name and its state keep the row's width. */
+@media (max-width: 640px) {
+  .pipeline-row {
+    grid-template-columns: minmax(0, 1fr) 34px 20px;
+    padding-right: 0;
+  }
+
+  .pipeline-row > .run-row {
+    grid-area: 1 / 1 / 2 / -1;
+    padding-right: 20px;
+  }
+
+  .pipeline-row .run-progress {
+    padding-right: 42px;
+  }
+
+  .pipeline-row > .row-bin {
+    grid-area: 1 / 2;
+    align-self: end;
+    margin-bottom: 5px;
+  }
+
+  .pipeline-row > .confirm-box {
+    margin-right: 20px;
+  }
+}
+
+.start-from .section-head {
+  margin-bottom: 4px;
+}
+
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.template-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  height: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  text-align: left;
+  white-space: normal;
+}
+
+.template-card:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.template-card:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.template-makes {
+  color: var(--accent-text);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.template-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.template-summary {
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.template-learn {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.learn-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* A pipeline's name has the top bar to itself (no GPU badges), so it can be longer than a run's. */
+.pipe-page .run-name {
+  max-width: 380px;
+}
+
+/* The pipeline steps' table in the docs: the names are short, the descriptions take the room. */
+.doc-steps td:first-child,
+.doc-steps th:first-child {
+  width: 1%;
+  padding-right: 16px;
+  white-space: nowrap;
 }

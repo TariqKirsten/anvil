@@ -20,12 +20,14 @@ function message(e: unknown) {
   return e instanceof Error ? e.message : String(e);
 }
 
-export function DataPicker(props: { slot: Slot; onChoose: (source: DataSource) => void; onClose: () => void }) {
+// title: what's being chosen, when it isn't one of the run's three splits (a pipeline's seed data, say).
+export function DataPicker(props: { slot?: Slot; title?: string; onChoose: (source: DataSource) => void;
+  onClose: () => void }) {
   const [where, setWhere] = useState<"files" | "upload" | "hub">("files");
   return (
     <div className="picker-panel">
       <div className="picker-head">
-        <span className="picker-title">Choose the {SLOT_NAMES[props.slot]} data</span>
+        <span className="picker-title">{props.title ?? `Choose the ${SLOT_NAMES[props.slot ?? "train"]} data`}</span>
         <Segmented
           label="Where the data comes from"
           value={where}
