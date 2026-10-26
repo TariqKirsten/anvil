@@ -21,7 +21,9 @@ On disk, in ANVIL_DATA/pipelines/<id>/:
                   [{id, from, to, kind}]}, kind being rows, model or check; about and note are what people wrote about
                   the pipeline and its steps (a template's explanations), which the run ignores
 - secrets.json    the Model steps' API keys, by node id; never sent back to the screen. A Model without a key of
-                  its own uses the key of another Model at the same address, so a key is pasted once
+                  its own uses the key of another Model at the same address, else the assistant's when it's at that
+                  address (anvil.assistant), so a key is pasted once
+- assistant/      the conversation with the pipeline assistant (anvil.assistant describes it)
 - preview/        the newest preview (a few rows, every step's work shown)
 - runs/<when>/    each full run (anvil.generate describes the files)
 
@@ -664,11 +666,15 @@ def list_pipelines() -> list[dict]:
 
 
 def detail(pipeline_id: str) -> dict:
+    from . import assistant  # anvil.assistant builds on this module
+
     data = read(pipeline_id)
     keys = read_keys(folder(pipeline_id))
     preview = run_status(pipeline_id, "preview") if (folder(pipeline_id) / "preview" / "status.json").exists() else None
+    s = assistant.settings()
     return {**data, "keys": sorted(k for k in keys if k in {n["id"] for n in data["nodes"]}),
-            "problems": check(data), "runs": runs(pipeline_id), "preview": preview}
+            "problems": check(data), "runs": runs(pipeline_id), "preview": preview,
+            "assistant_key_at": s["base_url"] if s["has_key"] else None}
 
 
 # ---------------------------------------------------------------- API keys
@@ -679,14 +685,16 @@ def read_keys(path: Path) -> dict[str, str]:
 
 def key_for(path: Path, nodes: list[dict], node: str, url: str | None = None) -> str | None:
     """A Model step's key: its own, else one saved for another Model step at the same address (url: the address the
-    screen has now, when it isn't saved yet)."""
+    screen has now, when it isn't saved yet), else the assistant's when the assistant is at that address."""
+    from . import assistant  # anvil.assistant builds on this module
+
     keys = read_keys(path)
     if node in keys:
         return keys[node]
     here = llm.base_url(url if url is not None else next(
         (str(n["config"]["base_url"]) for n in nodes if n["id"] == node), ""))
     return next((keys[n["id"]] for n in nodes if n["type"] == "model" and n["id"] in keys
-                 and llm.base_url(str(n["config"]["base_url"])) == here), None)
+                 and llm.base_url(str(n["config"]["base_url"])) == here), None) or assistant.key_at(here)
 
 
 def set_key(pipeline_id: str, node: str, key: str | None) -> None:
@@ -838,6 +846,8 @@ def start(pipeline_id: str, preview: bool, token: str | None) -> str:
 def new_run(pipeline_id: str, preview: bool) -> tuple[str, Path]:
     """A new run's id and folder, ready for anvil.generate: the pipeline as it is now, and whether it's a preview.
     ValueError when the pipeline can't run yet, or is running already."""
+    from . import sharing  # sharing builds on this module
+
     path = folder(pipeline_id)
     data = read(pipeline_id)
     errors = [p for p in check(data) if p["level"] == "error"]
@@ -848,6 +858,11 @@ def new_run(pipeline_id: str, preview: bool) -> tuple[str, Path]:
     if going:
         raise ValueError("A preview of this pipeline is still going." if going == "preview" else
                          "This pipeline is running. Stop it first, or wait for it to finish.")
+    for node in data["nodes"]:
+        holder = sharing.held(str(node["config"]["base_url"])) if node["type"] == "model" else None
+        if holder:
+            raise ValueError(f"{holder} is training on the GPUs the models at {llm.base_url(node['config']['base_url'])}"
+                             " load onto. Run this when training ends.")
     if preview:
         run_id, run = "preview", path / "preview"
         shutil.rmtree(run, ignore_errors=True)

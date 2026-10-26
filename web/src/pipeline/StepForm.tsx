@@ -8,7 +8,7 @@ import { DataPicker } from "../sections/DataPicker";
 import type { DataSource } from "../types";
 import { Badge, Field, NumberInput, Segmented } from "../ui";
 import {
-  FORMATS, ident, values, type Configs, type FilterOp, type FilterRule, type Graph, type PipelineNode,
+  address, FORMATS, ident, values, type Configs, type FilterOp, type FilterRule, type Graph, type PipelineNode,
   type PipelineProblem, type QuestionConfig, type SaveFormat, type StepDefaults, type StepType,
 } from "./graph";
 import { modelName } from "./steps";
@@ -22,6 +22,7 @@ export interface FormProps<T extends StepType> {
   keys: Set<string>;
   onKeysChange: (node: string, saved: boolean) => void;
   change: (patch: Partial<Configs[T]>) => void;
+  assistantKeyAt: string | null; // the assistant's address, when it has a key: a Model there without one uses it
 }
 
 function message(e: unknown) {
@@ -109,7 +110,7 @@ export function StepForm(props: FormProps<StepType>) {
 
 // ---------------------------------------------------------------- Model
 
-function ModelForm({ node, graph, problems, pipelineId, keys, onKeysChange, change }: FormProps<"model">) {
+function ModelForm({ node, graph, problems, pipelineId, keys, onKeysChange, change, assistantKeyAt }: FormProps<"model">) {
   const c = node.config;
   const id = (f: string) => `${node.id}-${f}`;
   const [models, setModels] = useState<string[] | null>(null);
@@ -120,6 +121,7 @@ function ModelForm({ node, graph, problems, pipelineId, keys, onKeysChange, chan
   const [keyError, setKeyError] = useState<string | null>(null);
   const saved = keys.has(node.id);
   const borrowed = saved ? null : graph.keyFrom(node.id, keys); // another Model's at this address
+  const assistants = !saved && !borrowed && !!assistantKeyAt && address(c.base_url) === address(assistantKeyAt);
 
   async function connect() {
     setConnecting(true);
@@ -186,10 +188,16 @@ function ModelForm({ node, graph, problems, pipelineId, keys, onKeysChange, chan
       <Field id={id("key")} label="API key" error={keyError ?? undefined}
         hint={saved && !replacing ? "Kept on the server: anvil never shows it again."
           : borrowed && !replacing ? `The same address as ${modelName(borrowed)}, so its key is used.`
-            : "Optional, if the endpoint wants one. It stays on the server, and Models at the same address share it."}>
+            : assistants && !replacing ? "The assistant's address (Settings), so the assistant's key is used."
+              : "Optional, if the endpoint wants one. It stays on the server, and Models at the same address share it."}>
         {borrowed && !replacing ? (
           <div className="input-row key-saved">
             <Badge tone="ok"><IconKey size={13} aria-hidden /> {modelName(borrowed)}'s key</Badge>
+            <button type="button" onClick={() => setReplacing(true)}>Use another key</button>
+          </div>
+        ) : assistants && !replacing ? (
+          <div className="input-row key-saved">
+            <Badge tone="ok"><IconKey size={13} aria-hidden /> The assistant's key</Badge>
             <button type="button" onClick={() => setReplacing(true)}>Use another key</button>
           </div>
         ) : saved && !replacing ? (

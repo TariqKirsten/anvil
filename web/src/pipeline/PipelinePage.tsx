@@ -3,7 +3,7 @@
 // from running, shown on the steps and under their settings.
 
 import {
-  IconAlertCircle, IconAlertTriangle, IconArrowLeft, IconChevronDown, IconEye, IconNotes, IconPlayerPlay,
+  IconAlertCircle, IconAlertTriangle, IconArrowLeft, IconChevronDown, IconEye, IconLoader2, IconNotes, IconPlayerPlay,
   IconPlayerStop, IconPlus, IconSitemap, IconTrash, IconX,
 } from "@tabler/icons-react";
 import {
@@ -11,13 +11,15 @@ import {
   useNodesState, useReactFlow, type Connection, type Edge, type EdgeChange, type NodeChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { api } from "../api";
 import { Topbar } from "../Topbar";
 import { Badge } from "../ui";
+import { AssistantView } from "./AssistantPanel";
 import {
-  canConnect, Graph, made, NODE_WIDTH, RUNNING, tidy, type Configs, type EdgeKind, type Pipeline, type PipelineEdge,
-  type PipelineNode, type PipelineProblem, type PipelineRun, type StepDefaults, type StepType,
+  canConnect, Graph, made, NODE_WIDTH, RUNNING, tidy, TURN_WORKING, type Configs, type Conversation, type EdgeKind,
+  type Pipeline, type PipelineEdge, type PipelineNode, type PipelineProblem, type PipelineRun, type StepDefaults,
+  type StepType,
 } from "./graph";
 import { PreviewView, RunsView } from "./RunPanel";
 import { StepForm } from "./StepForm";
@@ -93,6 +95,79 @@ export function PipelinePage({ id, onLogout }: { id: string; onLogout: () => voi
 }
 
 type Saving = { state: "saved" | "waiting" | "saving" | "failed"; error?: string };
+const SIDE_WIDTH_KEY = "anvil.pipeline-side-width";
+const CANVAS_LEAST = 320; // the side panel never squeezes the canvas narrower than this
+
+// The side panel's width: its own at least (380, or 340 on a smaller screen), wider when dragged, and never so wide the
+// canvas gets too narrow. Kept in this browser.
+function useSideWidth(): { width: number; min: number; max: number; set: (width: number) => void } {
+  const [viewport, setViewport] = useState(window.innerWidth);
+  const [wanted, setWanted] = useState<number | null>(() => {
+    try {
+      const saved = Number(localStorage.getItem(SIDE_WIDTH_KEY));
+      return saved > 0 ? saved : null;
+    } catch {
+      return null;
+    }
+  });
+  useEffect(() => {
+    const resized = () => setViewport(window.innerWidth);
+    window.addEventListener("resize", resized);
+    return () => window.removeEventListener("resize", resized);
+  }, []);
+  const min = viewport <= 1100 ? 340 : 380;
+  const max = Math.max(min, viewport - CANVAS_LEAST);
+  const clamp = (w: number) => Math.round(Math.min(max, Math.max(min, w)));
+  const set = (w: number) => {
+    const width = clamp(w);
+    setWanted(width);
+    try {
+      localStorage.setItem(SIDE_WIDTH_KEY, String(width));
+    } catch {
+      // not kept, then: the panel still has its width until the page closes
+    }
+  };
+  return { width: wanted === null ? min : clamp(wanted), min, max, set };
+}
+
+// The side panel's edge: drag it (or use the arrow keys) to widen the panel; a double click puts it back.
+function SideResizer({ width, min, max, onResize }: { width: number; min: number; max: number;
+  onResize: (width: number) => void }) {
+  const [dragging, setDragging] = useState(false);
+  const from = useRef<{ x: number; width: number } | null>(null);
+  const end = () => {
+    from.current = null;
+    setDragging(false);
+    document.body.classList.remove("resizing");
+  };
+  return (
+    <div className={`pane-resizer${dragging ? " dragging" : ""}`} style={{ right: width }} role="separator"
+      aria-orientation="vertical" aria-label="Side panel width" aria-valuemin={min} aria-valuemax={max}
+      aria-valuenow={width} tabIndex={0} title="Drag to widen the panel; double-click for its usual width"
+      onPointerDown={(e) => {
+        e.currentTarget.setPointerCapture(e.pointerId);
+        from.current = { x: e.clientX, width };
+        setDragging(true);
+        document.body.classList.add("resizing");
+      }}
+      onPointerMove={(e) => {
+        if (from.current) onResize(from.current.width + from.current.x - e.clientX);
+      }}
+      onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end}
+      onDoubleClick={() => onResize(min)}
+      onKeyDown={(e) => {
+        const step = e.shiftKey ? 64 : 16;
+        if (e.key === "ArrowLeft") onResize(width + step);
+        else if (e.key === "ArrowRight") onResize(width - step);
+        else if (e.key === "Home") onResize(min);
+        else if (e.key === "End") onResize(max);
+        else return;
+        e.preventDefault();
+      }} />
+  );
+}
+type Tab = "assistant" | "about" | "preview" | "runs";
+const CHANGES = new Set(["set_pipeline", "change_step", "add_step", "remove_step"]); // the assistant's tools that edit
 
 function Editor({ pipeline, defaults, onLogout }: { pipeline: Pipeline; defaults: StepDefaults; onLogout: () => void }) {
   const first = useMemo(() => toFlow(pipeline), [pipeline]);
@@ -109,9 +184,14 @@ function Editor({ pipeline, defaults, onLogout }: { pipeline: Pipeline; defaults
   const flow = useReactFlow();
   const [preview, setPreview] = useState<PipelineRun | null>(pipeline.preview);
   const [runs, setRuns] = useState<PipelineRun[]>(pipeline.runs);
-  const [tab, setTab] = useState<"about" | "preview" | "runs">("about");
+  const [tab, setTab] = useState<Tab>("about");
+  const tabPicked = useRef(false); // the person chose a tab: the conversation arriving doesn't move them
   const [openRun, setOpenRun] = useState<string | null>(pipeline.runs[0]?.id ?? null);
   const [startError, setStartError] = useState<string | null>(null);
+  const [assistantKeyAt, setAssistantKeyAt] = useState(pipeline.assistant_key_at);
+  const [conversation, setConversation] = useState<Conversation | null>(null);
+  const assisting = !!conversation?.turn && TURN_WORKING.includes(conversation.turn.state);
+  const side = useSideWidth();
 
   // The start of every line, at a size to read: the whole graph if it fits, else its top, zoomed out only so far.
   const showStart = useCallback(() => {
@@ -258,6 +338,65 @@ function Editor({ pipeline, defaults, onLogout }: { pipeline: Pipeline; defaults
       .then(({ run }) => (id === "preview" ? setPreview(run) : setRuns((rs) => rs.map((r) => (r.id === id ? run : r)))))
       .catch(() => null);
   }
+
+  // ------------------------------------------------------------ the assistant
+
+  // The pipeline as the server has it now, after the assistant (or Undo) changed it. Not saved back: it came from there.
+  async function readPipeline(fit: boolean) {
+    const { pipeline: p } = await api<{ pipeline: Pipeline }>(`/api/pipelines/${pipeline.id}`);
+    const fresh = toFlow(p);
+    setNodes(fresh.nodes);
+    setEdges(fresh.edges);
+    setName(p.name);
+    setAbout(p.about ?? "");
+    setProblems(p.problems);
+    setKeys(new Set(p.keys));
+    setPreview(p.preview);
+    setRuns(p.runs);
+    setAssistantKeyAt(p.assistant_key_at);
+    if (fit) requestAnimationFrame(showStart);
+  }
+
+  // A newer conversation: what the assistant changed reaches the canvas, and a preview it starts shows its counts there.
+  const shownConversation = useRef<Conversation | null>(null);
+  function take(c: Conversation) {
+    const before = shownConversation.current;
+    shownConversation.current = c;
+    setConversation(c);
+    if (!before) return;
+    const added = c.messages.slice(before.messages.length);
+    const edits = (x: Conversation) => x.messages.filter((m) => m.role === "action" && m.ok && CHANGES.has(m.tool ?? "")).length;
+    const ended = before.turn && TURN_WORKING.includes(before.turn.state) && !(c.turn && TURN_WORKING.includes(c.turn.state));
+    if (edits(c) !== edits(before) || ended) {
+      void readPipeline(added.some((m) => m.role === "action" && m.ok && m.tool === "set_pipeline")).catch(() => null);
+    }
+    if (c.turn?.doing?.startsWith("Previewing") && !before.turn?.doing?.startsWith("Previewing")) refresh("preview");
+  }
+  const takeLatest = useRef(take);
+  takeLatest.current = take;
+
+  // Read once (a pipeline with a conversation opens on it), then every second while the assistant works.
+  useEffect(() => {
+    api<Conversation>(`/api/pipelines/${pipeline.id}/assistant`)
+      .then((c) => {
+        takeLatest.current(c);
+        if (!tabPicked.current && c.messages.length) setTab("assistant");
+      })
+      .catch(() => null);
+  }, [pipeline.id]);
+
+  useEffect(() => {
+    if (!assisting) return;
+    const timer = setInterval(() => {
+      api<Conversation>(`/api/pipelines/${pipeline.id}/assistant`).then((c) => takeLatest.current(c)).catch(() => null);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [assisting, pipeline.id]);
+
+  // While it works the canvas waits: no step is open to edit, and nothing on it can change.
+  useEffect(() => {
+    if (assisting) pick(null);
+  }, [assisting]);
 
   // ------------------------------------------------------------ editing the graph
 
@@ -412,8 +551,9 @@ function Editor({ pipeline, defaults, onLogout }: { pipeline: Pipeline; defaults
   const node = selected ? graph.byId.get(selected) : undefined;
   const errors = problems.filter((p) => p.level === "error");
   const warnings = problems.filter((p) => p.level === "warn");
-  const blocked = errors.length ? "Fix what's marked in red first." : going.length
-    ? "Wait for the preview or run under way, or stop it." : null;
+  const blocked = assisting ? "The assistant is working: wait for it, or stop it."
+    : errors.length ? "Fix what's marked in red first." : going.length
+      ? "Wait for the preview or run under way, or stop it." : null;
   return (
     <div className="pipe-page">
       <Topbar onLogout={onLogout} right={
@@ -423,13 +563,14 @@ function Editor({ pipeline, defaults, onLogout }: { pipeline: Pipeline; defaults
             : warnings.length ? <Badge tone="warn">{warnings.length} to look at</Badge> : <Badge tone="ok">Ready</Badge>}
         </>
       }>
-        <input className="run-name" aria-label="Pipeline name" value={name}
+        <input className="run-name" aria-label="Pipeline name" value={name} readOnly={assisting}
           onChange={(e) => {
             setName(e.target.value);
             touch();
           }} />
       </Topbar>
-      <div className="pipe-main">
+      <div className="pipe-main" style={{ "--side-width": `${side.width}px` } as CSSProperties}>
+        <SideResizer width={side.width} min={side.min} max={side.max} onResize={side.set} />
         <div className="pipe-canvas">
           <CanvasContext.Provider value={canvas}>
             <ReactFlow<StepNodeType, Edge> nodes={nodes} edges={edges} nodeTypes={nodeTypes}
@@ -437,16 +578,19 @@ function Editor({ pipeline, defaults, onLogout }: { pipeline: Pipeline; defaults
               isValidConnection={isValidConnection}
               onSelectionChange={({ nodes: picked }) => setSelected(picked.length === 1 ? picked[0].id : null)}
               onInit={showStart} minZoom={0.2} maxZoom={1.75}
-              deleteKeyCode={["Backspace", "Delete"]} connectionRadius={28}
+              nodesDraggable={!assisting} nodesConnectable={!assisting} elementsSelectable={!assisting}
+              deleteKeyCode={assisting ? null : ["Backspace", "Delete"]} connectionRadius={28}
               connectionLineStyle={{ stroke: "var(--accent)", strokeWidth: 2 }}>
               <Background variant={BackgroundVariant.Dots} gap={18} size={1.2} />
               <Controls showInteractive={false} position="bottom-left" />
               <Panel position="top-left" className="canvas-tools">
-                <AddStep onAdd={addStep} after={node && node.type !== "save" ? STEPS[node.type].label : null} />
-                <button type="button" onClick={tidyUp} title="Line the steps up">
-                  <IconSitemap size={16} aria-hidden /> Tidy up
+                <AddStep onAdd={addStep} after={node && node.type !== "save" ? STEPS[node.type].label : null}
+                  disabled={assisting} />
+                <button type="button" onClick={tidyUp} title="Line the steps up" aria-label="Tidy up" disabled={assisting}>
+                  <IconSitemap size={16} aria-hidden /> <span className="tool-text">Tidy up</span>
                 </button>
               </Panel>
+
               <Panel position="top-right" className="canvas-tools run-tools">
                 {going.length ? (
                   <button type="button" onClick={() => going.forEach(stop)}
@@ -455,8 +599,9 @@ function Editor({ pipeline, defaults, onLogout }: { pipeline: Pipeline; defaults
                   </button>
                 ) : (
                   <>
-                    <button type="button" onClick={() => start(true)} disabled={!!blocked} title={blocked ?? "Make a few rows and see each step's work"}>
-                      <IconEye size={16} aria-hidden /> Preview
+                    <button type="button" onClick={() => start(true)} disabled={!!blocked} aria-label="Preview"
+                      title={blocked ?? "Make a few rows and see each step's work"}>
+                      <IconEye size={16} aria-hidden /> <span className="tool-text-narrow">Preview</span>
                     </button>
                     <button type="button" className="primary" onClick={() => start(false)} disabled={!!blocked}
                       title={blocked ?? "Make every Save's rows"}>
@@ -467,16 +612,26 @@ function Editor({ pipeline, defaults, onLogout }: { pipeline: Pipeline; defaults
               </Panel>
             </ReactFlow>
           </CanvasContext.Provider>
+          {assisting && (
+            <p className="canvas-lock">
+              <IconLoader2 size={15} className="spin" aria-hidden /> The assistant is working: the canvas waits until
+              it's done.
+            </p>
+          )}
         </div>
         <aside className="pipe-side" aria-label={node ? `${STEPS[node.type].label} settings` : "About this pipeline"}>
           {startError && <p className="error-box side-error">{startError}</p>}
           {!node && (
-            <div className="side-tabs" role="tablist" aria-label="About, preview and runs">
-              {(["about", "preview", "runs"] as const).map((t) => (
+            <div className="side-tabs" role="tablist" aria-label="Assistant, about, preview and runs">
+              {(["assistant", "about", "preview", "runs"] as const).map((t) => (
                 <button key={t} type="button" role="tab" aria-selected={tab === t} className={tab === t ? "on" : ""}
-                  onClick={() => setTab(t)}>
-                  {t === "about" ? "About" : t === "preview" ? "Preview" : `Runs${runs.length ? ` ${runs.length}` : ""}`}
-                  {((t === "preview" && preview && RUNNING.includes(preview.state))
+                  onClick={() => {
+                    tabPicked.current = true;
+                    setTab(t);
+                  }}>
+                  {t === "assistant" ? "Assistant" : t === "about" ? "About" : t === "preview" ? "Preview"
+                    : `Runs${runs.length ? ` ${runs.length}` : ""}`}
+                  {((t === "assistant" && assisting) || (t === "preview" && preview && RUNNING.includes(preview.state))
                     || (t === "runs" && runs.some((r) => RUNNING.includes(r.state)))) && <span className="live-dot" aria-label="running" />}
                 </button>
               ))}
@@ -492,7 +647,12 @@ function Editor({ pipeline, defaults, onLogout }: { pipeline: Pipeline; defaults
                 return next;
               })}
               change={(patch) => change(node.id, patch)} onRemove={() => removeStep(node.id)} onClose={() => pick(null)}
-              onNote={(note) => changeNote(node.id, note)} />
+              onNote={(note) => changeNote(node.id, note)} assistantKeyAt={assistantKeyAt} />
+          ) : tab === "assistant" ? (
+            <AssistantView pipelineId={pipeline.id} conversation={conversation} onChange={take}
+              beforeSend={async () => {
+                await saveNow();
+              }} onPipelineChanged={() => void readPipeline(true).catch(() => null)} />
           ) : tab === "preview" ? (
             <PreviewView pipelineId={pipeline.id} preview={preview} graph={graph} blocked={blocked}
               onStart={() => start(true)} onStop={() => preview && stop(preview)} />
@@ -518,7 +678,8 @@ function SaveBadge({ saving }: { saving: Saving }) {
   return <Badge className="save-state">Saving…</Badge>;
 }
 
-function AddStep({ onAdd, after }: { onAdd: (type: StepType) => void; after: string | null }) {
+function AddStep({ onAdd, after, disabled }: { onAdd: (type: StepType) => void; after: string | null;
+  disabled?: boolean }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -535,8 +696,10 @@ function AddStep({ onAdd, after }: { onAdd: (type: StepType) => void; after: str
   }, [open]);
   return (
     <div className="add-step" ref={box}>
-      <button type="button" className="primary" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
-        <IconPlus size={16} aria-hidden /> Add a step <IconChevronDown size={14} aria-hidden />
+      <button type="button" className="primary" aria-expanded={open} onClick={() => setOpen((o) => !o)}
+        disabled={disabled}>
+        <IconPlus size={16} aria-hidden /> <span>Add<span className="tool-text"> a step</span></span>
+        <IconChevronDown size={14} aria-hidden />
       </button>
       {open && (
         <div className="step-menu" role="menu">
@@ -563,7 +726,7 @@ function Inspector(props: {
   node: PipelineNode; graph: Graph; problems: PipelineProblem[]; defaults: StepDefaults; pipelineId: string;
   keys: Set<string>; onKeysChange: (node: string, saved: boolean) => void;
   change: (patch: Partial<Configs[StepType]>) => void; onRemove: () => void; onClose: () => void;
-  onNote: (note: string) => void;
+  onNote: (note: string) => void; assistantKeyAt: string | null;
 }) {
   const info = STEPS[props.node.type];
   const general = props.problems.filter((p) => !p.field);
@@ -592,7 +755,8 @@ function Inspector(props: {
         </ul>
       )}
       <StepForm node={props.node} graph={props.graph} problems={props.problems} defaults={props.defaults}
-        pipelineId={props.pipelineId} keys={props.keys} onKeysChange={props.onKeysChange} change={props.change} />
+        pipelineId={props.pipelineId} keys={props.keys} onKeysChange={props.onKeysChange} change={props.change}
+        assistantKeyAt={props.assistantKeyAt} />
     </div>
   );
 }

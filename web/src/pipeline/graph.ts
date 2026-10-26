@@ -207,6 +207,38 @@ export interface Pipeline {
   problems: PipelineProblem[];
   runs: PipelineRun[];
   preview: PipelineRun | null;
+  assistant_key_at: string | null; // the assistant's address, when it has a key: Model steps there use it
+}
+
+// The pipeline assistant (anvil/assistant.py): a conversation, one turn at a time. It talks a new pipeline through
+// before it builds it, and makes the changes it's asked for.
+export type TurnState = "starting" | "working" | "waiting" | "done" | "failed" | "stopped";
+export const TURN_WORKING: TurnState[] = ["starting", "working", "waiting"];
+
+export interface AssistantTurn {
+  turn: number;
+  state: TurnState;
+  doing?: string | null; // what it's doing now: Thinking, Previewing: 2 of 5 rows…
+  error?: string | null;
+  // what it waits for: training on the GPUs its server uses, or a run at its address with another model
+  waiting_for?: { training?: string; pipeline?: string; name?: string; run?: string; model?: string;
+    base_url?: string } | null;
+}
+
+export interface AssistantMessage {
+  role: "user" | "assistant" | "action" | "note"; // action: a line about a tool it used
+  text: string;
+  at?: number;
+  ok?: boolean;
+  tool?: string;
+}
+
+export interface Conversation {
+  messages: AssistantMessage[];
+  turn: AssistantTurn | null;
+  undo: number | null; // the newest turn whose changes Undo puts back
+  model: string;
+  ready: boolean; // the assistant's model is chosen in Settings
 }
 
 export interface PipelineSummary {

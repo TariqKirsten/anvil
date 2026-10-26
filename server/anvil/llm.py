@@ -1,4 +1,4 @@
-"""Talking to an OpenAI-compatible endpoint: the models it serves, and chat completions.
+"""Talking to an OpenAI-compatible endpoint: the models it serves, and chat completions, with tools or without.
 
 Any server that speaks OpenAI's API will do: vLLM, llama.cpp's llama-server, radiance, Ollama, LM Studio, OpenAI
 itself or OpenRouter. A pipeline's Model step (anvil.pipelines) holds the endpoint's base URL, the model and how to ask
@@ -9,6 +9,7 @@ anvil runs in a container, where localhost is the container itself: a server on 
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -37,6 +38,24 @@ class Reply:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cut: bool = False  # the reply stopped at max tokens
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: str  # JSON, as the model wrote it
+
+
+@dataclass
+class Answer:
+    """A reply that may call tools (OpenAI's function calling)."""
+    text: str
+    calls: list[ToolCall]
+    seconds: float
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cut: bool = False
 
 
 def base_url(url: str) -> str:
@@ -163,10 +182,9 @@ class Client:
         body.update(self.extra)
         return body
 
-    def chat(self, messages: list[dict], temperature: float | None = None, max_tokens: int | None = None) -> Reply:
-        """One chat completion. Network trouble, rate limits and server errors are tried again, waiting 1, 2, 4… s;
-        anything else the endpoint refuses raises EndpointError at once."""
-        body = self.payload(messages, temperature, max_tokens)
+    def _complete(self, body: dict) -> tuple[dict, dict, float]:
+        """POST a chat completion: (the first choice, the usage, seconds). Network trouble, rate limits and server
+        errors are tried again, waiting 1, 2, 4… s; anything else the endpoint refuses raises EndpointError at once."""
         url = f"{self.url}/chat/completions"
         for attempt in range(self.retries + 1):
             started = time.monotonic()
@@ -187,15 +205,34 @@ class Client:
             try:
                 data = response.json()
                 choice = data["choices"][0]
-                content = choice["message"].get("content")
-            except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+                if not isinstance(choice["message"], dict):
+                    raise TypeError
+            except (ValueError, KeyError, IndexError, TypeError):
                 raise EndpointError(f"{url} didn't answer like an OpenAI-compatible endpoint.") from None
-            usage = data.get("usage") or {}
-            cut = choice.get("finish_reason") == "length"
-            text = answer_text(content)
-            if not text and cut:
-                raise EndpointError("The reply hit max tokens before it said anything (the model may have spent them "
-                                    "thinking). Raise Max tokens, or turn thinking off.")
-            return Reply(text, time.monotonic() - started, int(usage.get("prompt_tokens") or 0),
-                         int(usage.get("completion_tokens") or 0), cut)
+            return choice, data.get("usage") or {}, time.monotonic() - started
         raise EndpointError(f"{url} kept failing.")  # unreachable: the last attempt returns or raises
+
+    def chat(self, messages: list[dict], temperature: float | None = None, max_tokens: int | None = None) -> Reply:
+        """One chat completion, its text without the model's thinking."""
+        choice, usage, seconds = self._complete(self.payload(messages, temperature, max_tokens))
+        cut = choice.get("finish_reason") == "length"
+        text = answer_text(choice["message"].get("content"))
+        if not text and cut:
+            raise EndpointError("The reply hit max tokens before it said anything (the model may have spent them "
+                                "thinking). Raise Max tokens, or turn thinking off.")
+        return Reply(text, seconds, int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0), cut)
+
+    def answer(self, messages: list[dict], tools: list[dict]) -> Answer:
+        """One chat completion the model may answer by calling tools: its text, without thinking, and the calls."""
+        choice, usage, seconds = self._complete({**self.payload(messages), "tools": tools})
+        calls = []
+        for i, raw in enumerate(choice["message"].get("tool_calls") or []):
+            function = raw.get("function") if isinstance(raw, dict) else None
+            if not isinstance(function, dict) or not function.get("name"):
+                continue
+            arguments = function.get("arguments")
+            calls.append(ToolCall(str(raw.get("id") or f"call_{i}"), str(function["name"]),
+                                  arguments if isinstance(arguments, str) else json.dumps(arguments or {})))
+        return Answer(answer_text(choice["message"].get("content")), calls, seconds,
+                      int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0),
+                      choice.get("finish_reason") == "length")

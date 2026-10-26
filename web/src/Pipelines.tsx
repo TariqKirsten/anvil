@@ -1,10 +1,12 @@
 // Every pipeline, the one changed last first, with how its newest run went, and a bin to delete it. New pipeline
-// offers an empty one or a template to learn from (anvil/templates.py), makes it and opens it.
+// starts from a description (the assistant talks it through and builds it), a template to learn from
+// (anvil/templates.py) or nothing, makes the pipeline and opens it.
 
-import { IconLoader2, IconPlus, IconTrash, IconX } from "@tabler/icons-react";
-import { useEffect, useRef, useState } from "react";
+import { IconLoader2, IconPlus, IconSparkles, IconTrash, IconX } from "@tabler/icons-react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "./api";
 import type { PipelineRunState, PipelineSummary, Template } from "./pipeline/graph";
+import type { AssistantSettings } from "./types";
 import { when } from "./Runs";
 import { Topbar } from "./Topbar";
 import { Badge } from "./ui";
@@ -31,13 +33,17 @@ export function Pipelines({ onLogout }: { onLogout: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [templates, setTemplates] = useState<Template[] | null>(null);
   const [choosing, setChoosing] = useState(false);
-  const [making, setMaking] = useState<string | null>(null); // the template being made, or "" for an empty one
+  const [making, setMaking] = useState<string | null>(null); // a template's id, "" for an empty one, or "describe"
+  const [assistantReady, setAssistantReady] = useState(false);
   const deletes = useRef(0); // a list asked for before a delete went through still has the pipeline
 
   useEffect(() => {
     api<{ templates: Template[] }>("/api/pipeline-templates")
       .then((r) => setTemplates(r.templates))
       .catch((e: Error) => setError(e.message));
+    api<{ settings: AssistantSettings }>("/api/assistant")
+      .then((r) => setAssistantReady(!!r.settings.model))
+      .catch(() => null);
   }, []);
 
   useEffect(() => {
@@ -60,6 +66,20 @@ export function Pipelines({ onLogout }: { onLogout: () => void }) {
     setMaking(template ?? "");
     try {
       const made = await api<{ pipeline: { id: string } }>("/api/pipelines", { json: { template } });
+      window.location.hash = `#/pipelines/${made.pipeline.id}`;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setMaking(null);
+    }
+  }
+
+  // A pipeline from a description: an empty one, with the description as the first message to the assistant, which
+  // talks it through before it builds it.
+  async function describe(text: string) {
+    setMaking("describe");
+    try {
+      const made = await api<{ pipeline: { id: string } }>("/api/pipelines", { json: { template: null } });
+      await api(`/api/pipelines/${made.pipeline.id}/assistant`, { json: { message: text } });
       window.location.hash = `#/pipelines/${made.pipeline.id}`;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -93,7 +113,8 @@ export function Pipelines({ onLogout }: { onLogout: () => void }) {
         </p>
       )}
       {(choosing || none) && (
-        <StartFrom templates={templates} making={making} onMake={make} onClose={none ? undefined : () => setChoosing(false)} />
+        <StartFrom templates={templates} making={making} onMake={make} onDescribe={describe} ready={assistantReady}
+          onClose={none ? undefined : () => setChoosing(false)} />
       )}
       {pipelines && pipelines.length > 0 && (
         <div className="section run-list">
@@ -172,10 +193,19 @@ function PipelineRow({ pipeline: p, onDeleted }: { pipeline: PipelineSummary; on
   );
 }
 
-// An empty pipeline, or a template: a working pipeline with a note on every step about why it's there.
-function StartFrom({ templates, making, onMake, onClose }: { templates: Template[] | null; making: string | null;
-  onMake: (template: string | null) => void; onClose?: () => void }) {
+// A description for the assistant, an empty pipeline, or a template: a working pipeline with a note on every step about
+// why it's there.
+function StartFrom({ templates, making, onMake, onDescribe, ready, onClose }: { templates: Template[] | null;
+  making: string | null; onMake: (template: string | null) => void; onDescribe: (text: string) => void; ready: boolean;
+  onClose?: () => void }) {
+  const [text, setText] = useState("");
   const busy = (id: string) => making === id && <IconLoader2 size={15} className="spin" aria-hidden />;
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (ready && text.trim() && making === null) onDescribe(text.trim());
+  }
+
   return (
     <div className="section start-from">
       <div className="section-head">
@@ -186,8 +216,22 @@ function StartFrom({ templates, making, onMake, onClose }: { templates: Template
           </button>
         )}
       </div>
-      <p className="hint">The templates run on radiance's Gemma: paste its key into their Model, then press Preview. Every
-        step has a note on why it's there and what to try.</p>
+      <form className="describe" onSubmit={submit}>
+        <label htmlFor="describe-text"><IconSparkles size={15} aria-hidden /> Describe the data you want</label>
+        <textarea id="describe-text" rows={2} value={text} disabled={!ready}
+          placeholder="Short messages bank customers send, labelled with whether they're about fraud"
+          onChange={(e) => setText(e.target.value)} />
+        <div className="form-actions">
+          <p className="hint">{ready ? "The assistant talks it through with you, then builds it when you say so."
+            : <>Choose the assistant's model in <a href="#/settings">Settings</a> first.</>}</p>
+          <button type="submit" className="primary" disabled={!ready || !text.trim() || making !== null}>
+            {busy("describe")} Talk it through
+          </button>
+        </div>
+      </form>
+      <p className="hint">Or start from a template. They run on radiance's Gemma: with the assistant's key saved in
+        Settings they're ready to preview, otherwise paste the key into their Model. Every step has a note on why it's
+        there and what to try.</p>
       <div className="template-grid">
         <button type="button" className="template-card" onClick={() => onMake(null)} disabled={making !== null}>
           <span className="template-makes">Your own</span>

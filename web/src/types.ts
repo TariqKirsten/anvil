@@ -17,6 +17,25 @@ export interface Account {
   hf: HfStatus;
 }
 
+// The pipeline assistant's model (anvil/assistant.py): any OpenAI-compatible model that takes tools.
+export interface AssistantSettings {
+  base_url: string;
+  model: string;
+  temperature: number | null;
+  max_tokens: number;
+  thinking: "default" | "on" | "off";
+  reasoning_effort: "default" | "none" | "low" | "medium" | "high" | "xhigh"; // sent as reasoning_effort, unless default
+  context: number; // tokens the model holds: older parts of a long conversation are left out to fit
+  timeout: number;
+  has_key: boolean;
+}
+
+// GPUs shared with a model server (anvil/sharing.py): the address anvil calls before training.
+export interface SharingSettings {
+  url: string;
+  has_key: boolean;
+}
+
 export type Status = "ok" | "info" | "warn" | "bad";
 
 export interface CheckItem {

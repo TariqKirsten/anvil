@@ -2455,11 +2455,52 @@ button:disabled {
   padding: 14px 20px;
 }
 
+/* The side panel's width is --side-width when it's been dragged wider (the resizer on its edge), else its own. */
 .pipe-main {
+  position: relative;
   display: grid;
   flex: 1;
-  grid-template-columns: minmax(0, 1fr) 380px;
+  grid-template-columns: minmax(0, 1fr) var(--side-width, 380px);
   min-height: 0;
+}
+
+.pane-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 6;
+  width: 9px;
+  transform: translateX(50%);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pane-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+  transition: background 0.12s, left 0.12s, width 0.12s;
+}
+
+.pane-resizer:hover::after,
+.pane-resizer:focus-visible::after,
+.pane-resizer.dragging::after {
+  left: 3px;
+  width: 3px;
+  background: var(--accent);
+}
+
+.pane-resizer:focus-visible {
+  outline: none; /* the line it shows is the focus ring */
+}
+
+body.resizing,
+body.resizing * {
+  cursor: col-resize !important;
+  user-select: none;
 }
 
 .pipe-canvas {
@@ -2470,6 +2511,8 @@ button:disabled {
 }
 
 .pipe-side {
+  display: flex; /* a column, so the assistant's conversation can fill it */
+  flex-direction: column;
   min-height: 0;
   overflow-y: auto;
   background: var(--surface);
@@ -3114,7 +3157,7 @@ select[aria-invalid="true"] {
 
 @media (max-width: 1100px) {
   .pipe-main {
-    grid-template-columns: minmax(0, 1fr) 340px;
+    grid-template-columns: minmax(0, 1fr) var(--side-width, 340px);
   }
 }
 
@@ -3126,6 +3169,10 @@ select[aria-invalid="true"] {
 
   .pipe-main {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pane-resizer {
+    display: none;
   }
 
   .pipe-canvas {
@@ -3170,7 +3217,7 @@ select[aria-invalid="true"] {
 .side-tabs button {
   height: 34px;
   margin-bottom: -1px;
-  padding: 0 12px;
+  padding: 0 10px;
   border: none;
   border-bottom: 2px solid transparent;
   border-radius: 0;
@@ -3702,4 +3749,309 @@ button.row-bin[aria-expanded="true"] {
   width: 1%;
   padding-right: 16px;
   white-space: nowrap;
+}
+
+/* ---- pipelines: the assistant */
+
+/* The conversation scrolls with the panel; the box to write in stays at its bottom. */
+.assistant {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+}
+
+.assistant-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  padding: 10px 18px 0;
+  font-size: 13px;
+}
+
+.assistant-tools > .hint:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin: 0 auto 0 0;
+  overflow-wrap: anywhere;
+}
+
+.assistant-tools button.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.assistant-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-2);
+}
+
+button.link.danger-link {
+  color: var(--bad);
+}
+
+.assistant-log {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 18px;
+}
+
+.assistant-intro h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.assistant-examples {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+button.learn-chip {
+  height: auto;
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+}
+
+button.learn-chip:hover {
+  border-color: var(--accent);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.said p {
+  margin: 0;
+}
+
+.said-you {
+  align-self: flex-end;
+  max-width: 88%;
+  padding: 7px 12px 8px;
+  border-radius: 12px 12px 4px 12px;
+  background: var(--accent-bg);
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.said-assistant {
+  font-size: 13.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.md p,
+.md ul,
+.md ol {
+  margin: 0 0 8px;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md ul,
+.md ol {
+  padding-left: 20px;
+}
+
+.md li + li {
+  margin-top: 3px;
+}
+
+.md code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+.md-heading {
+  font-weight: 600;
+}
+
+.said-action {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.said-action svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+.said-action.failed,
+.said-action.failed svg {
+  color: var(--warn);
+}
+
+.said-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.assistant-doing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.assistant-wait {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+  font-size: 13px;
+}
+
+.assistant-wait p {
+  margin: 0;
+}
+
+.ask-box {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 18px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.ask-box textarea {
+  min-height: 64px;
+  max-height: 240px;
+  font-size: 13.5px;
+  resize: vertical;
+}
+
+.ask-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ask-actions .hint {
+  margin: 0;
+}
+
+.ask-actions button {
+  flex: none;
+}
+
+.ask-box > .hint,
+.ask-box > .error-box {
+  margin: 0;
+}
+
+/* Over the canvas while the assistant works: nothing on it can change until it's done. */
+.canvas-lock {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+  max-width: calc(100% - 140px);
+  margin: 0;
+  padding: 6px 12px;
+  transform: translateX(-50%);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.canvas-lock svg {
+  flex: none;
+}
+
+/* New pipeline: a description for the assistant, above the templates. */
+.describe {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 16px;
+  padding: 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  background: var(--accent-bg);
+}
+
+.describe label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.describe textarea {
+  background: var(--surface);
+}
+
+.describe .form-actions {
+  margin-top: 0;
+}
+
+/* Settings: the assistant's model, and the GPUs shared with a model server. */
+.assistant-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.assistant-form .form-actions {
+  margin-top: 0;
+}
+
+/* A phone: the canvas's buttons get shorter, so the two groups at its top don't run into each other. */
+@media (max-width: 560px) {
+  .canvas-tools .tool-text {
+    display: none;
+  }
+}
+
+@media (max-width: 380px) {
+  .canvas-tools .tool-text-narrow {
+    display: none;
+  }
 }

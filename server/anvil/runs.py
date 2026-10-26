@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, datasets, export, folders, gpus, models_check, picking, supervisor, upload
+from . import config, datasets, export, folders, gpus, models_check, picking, sharing, supervisor, upload
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 ACTIVE = {"starting", "loading", "running", "saving"}
@@ -243,6 +243,7 @@ def create(form: dict, prepare: dict, token: str | None) -> str:
         method = fmt  # for language models the data decides: chat, prompt and completion, or plain text
     checkpoints = _check_picking(form["checkpoints"], train_as, job.report)
 
+    sharing.free_cards()  # a model server on these cards lets go of them first (Settings)
     train_gpus, judge_gpu = _choose_gpus(form.get("gpus"), form.get("spareChecks", True) is not False)
     run_id = _new_id(form.get("name") or "run")
     path = runs_dir() / run_id
@@ -734,6 +735,7 @@ def resume(run_id: str, token: str | None, patience: int | None = None, epochs: 
         raise ValueError("This run is being uploaded to Hugging Face. Try again when the upload is done.")
     if not Path(cfg["data"]["prepared"], "train.parquet").exists():
         raise ValueError("The prepared data for this run is gone. Prepare it again and start a new run.")
+    sharing.free_cards()
     busy = busy_gpus()
     cards = training_gpus(cfg)  # the same cards again: the batches are split by how many there are
     taken = [f"GPU {gpu} is busy with {busy[gpu]}" for gpu in cards if gpu in busy]

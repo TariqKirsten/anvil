@@ -15,7 +15,8 @@ from fastapi.requests import Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from . import accounts, auth, config, datasets, folders, gpus, llm, models_check, pipelines, runs, templates
+from . import (accounts, assistant, auth, config, datasets, folders, gpus, llm, models_check, pipelines, runs, sharing,
+               templates)
 
 REPO_ID = re.compile(r"^[\w.-]+/[\w.-]+$")
 
@@ -552,9 +553,15 @@ class PipelineBody(BaseModel):
     edges: list[dict] = []
 
 
+def _not_while_assistant(pipeline_id: str) -> None:
+    if assistant.working(pipeline_id):
+        raise HTTPException(409, "The assistant is working on this pipeline: wait for it to finish, or stop it.")
+
+
 @app.put("/api/pipelines/{pipeline_id}")
 def save_pipeline(pipeline_id: str, body: PipelineBody) -> dict:
     """Save the graph as the screen has it (half drawn is fine). The answer says what still stops it from running."""
+    _not_while_assistant(pipeline_id)
     try:
         data = pipelines.save(pipeline_id, body.model_dump(exclude_none=True))
     except FileNotFoundError as exc:
@@ -564,6 +571,7 @@ def save_pipeline(pipeline_id: str, body: PipelineBody) -> dict:
 
 @app.delete("/api/pipelines/{pipeline_id}")
 def delete_pipeline(pipeline_id: str) -> dict:
+    _not_while_assistant(pipeline_id)
     try:
         pipelines.delete(pipeline_id)
     except (FileNotFoundError, ValueError) as exc:
@@ -629,6 +637,7 @@ class PipelineStart(BaseModel):
 
 @app.post("/api/pipelines/{pipeline_id}/runs")
 def start_pipeline(pipeline_id: str, body: PipelineStart, request: Request) -> dict:
+    _not_while_assistant(pipeline_id)
     try:
         return {"id": pipelines.start(pipeline_id, body.preview, hf_token(request))}
     except (FileNotFoundError, ValueError) as exc:
@@ -685,6 +694,163 @@ def delete_pipeline_run(pipeline_id: str, run_id: str) -> dict:
     except (FileNotFoundError, ValueError) as exc:
         raise _pipeline_failure(exc) from exc
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- the pipeline assistant
+
+class AssistantSettings(BaseModel):
+    base_url: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    thinking: str | None = None
+    reasoning_effort: str | None = None
+    context: int | None = None
+    timeout: int | None = None
+
+
+@app.get("/api/assistant")
+def assistant_settings() -> dict:
+    return {"settings": assistant.settings()}
+
+
+@app.put("/api/assistant")
+def save_assistant_settings(body: AssistantSettings) -> dict:
+    given = body.model_dump(exclude_unset=True)
+    try:
+        return {"settings": assistant.save_settings(given)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.put("/api/assistant/key")
+def save_assistant_key(body: KeyBody) -> dict:
+    if not body.key.strip():
+        raise HTTPException(400, "Paste the key first.")
+    assistant.set_key(body.key.strip())
+    return {"settings": assistant.settings()}
+
+
+@app.delete("/api/assistant/key")
+def remove_assistant_key() -> dict:
+    assistant.set_key(None)
+    return {"settings": assistant.settings()}
+
+
+class AssistantModels(BaseModel):
+    base_url: str | None = None
+
+
+@app.post("/api/assistant/models")
+def assistant_models(body: AssistantModels) -> dict:
+    """The models an address serves, asked with the assistant's key."""
+    try:
+        return assistant.models(body.base_url)
+    except llm.EndpointError as exc:
+        raise _pipeline_failure(exc) from exc
+
+
+@app.get("/api/pipelines/{pipeline_id}/assistant")
+def pipeline_assistant(pipeline_id: str) -> dict:
+    try:
+        return assistant.conversation(pipeline_id)
+    except FileNotFoundError as exc:
+        raise _pipeline_failure(exc) from exc
+
+
+class AssistantMessage(BaseModel):
+    message: str
+
+
+@app.post("/api/pipelines/{pipeline_id}/assistant")
+def message_assistant(pipeline_id: str, body: AssistantMessage, request: Request) -> dict:
+    """Send the assistant a message: it works on it in a process of its own; the conversation says how it goes."""
+    try:
+        return assistant.start_turn(pipeline_id, body.message, hf_token(request))
+    except (FileNotFoundError, ValueError) as exc:
+        raise _pipeline_failure(exc) from exc
+
+
+@app.post("/api/pipelines/{pipeline_id}/assistant/stop")
+def stop_assistant(pipeline_id: str) -> dict:
+    try:
+        assistant.stop_turn(pipeline_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise _pipeline_failure(exc) from exc
+    return {"ok": True}
+
+
+@app.post("/api/pipelines/{pipeline_id}/assistant/go")
+def assistant_ask_anyway(pipeline_id: str) -> dict:
+    """The assistant waits while a run uses its address with another model: ask it anyway."""
+    try:
+        assistant.ask_anyway(pipeline_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise _pipeline_failure(exc) from exc
+    return {"ok": True}
+
+
+@app.post("/api/pipelines/{pipeline_id}/assistant/undo")
+def undo_assistant(pipeline_id: str) -> dict:
+    try:
+        return assistant.undo(pipeline_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise _pipeline_failure(exc) from exc
+
+
+@app.delete("/api/pipelines/{pipeline_id}/assistant")
+def clear_assistant(pipeline_id: str) -> dict:
+    """Start over: the conversation goes; the pipeline stays as it is."""
+    try:
+        assistant.clear(pipeline_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise _pipeline_failure(exc) from exc
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- GPUs shared with a model server
+
+class SharingBody(BaseModel):
+    url: str
+
+
+@app.get("/api/sharing")
+def sharing_settings() -> dict:
+    return {"sharing": sharing.settings()}
+
+
+@app.put("/api/sharing")
+def save_sharing(body: SharingBody) -> dict:
+    """The address anvil calls (POST) before training, so a model server on these GPUs lets go of them."""
+    try:
+        return {"sharing": sharing.save(body.url)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.put("/api/sharing/key")
+def save_sharing_key(body: KeyBody) -> dict:
+    if not body.key.strip():
+        raise HTTPException(400, "Paste the key first.")
+    sharing.set_key(body.key.strip())
+    return {"sharing": sharing.settings()}
+
+
+@app.delete("/api/sharing/key")
+def remove_sharing_key() -> dict:
+    sharing.set_key(None)
+    return {"sharing": sharing.settings()}
+
+
+@app.post("/api/sharing/free")
+def free_cards_now() -> dict:
+    """Call the address now, as training would."""
+    if not sharing.url():
+        raise HTTPException(409, "Save an address first.")
+    try:
+        return {"note": sharing.free_cards()}
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.get("/api/{rest:path}")
