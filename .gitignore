@@ -1,7 +1,39 @@
+# Local settings and secrets
 .env
+.env.*
+!.env.example
 compose.override.yaml
+*.pem
+*.key
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+
+# The web app's dependencies and build
 web/node_modules/
 web/dist/
+*.tsbuildinfo
+
+# Model weights, datasets and run output belong in the folders that .env names, not in the repository
+*.safetensors
+*.gguf
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.parquet
+/data/
+/runs/
+
+# Editors, OS files and agent tools
+.claude/
+.idea/
+.vscode/
+*.swp
+.DS_Store
