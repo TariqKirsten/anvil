@@ -8,8 +8,9 @@ anywhere, all from one web app.**
 ![ROCm 10.1](https://img.shields.io/badge/ROCm-10.1-red)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-Anvil fine-tunes language models and decision models: small models that answer typed questions
-about an input (yes or no, a choice, or a score) with probabilities. It runs in Docker on AMD GPUs.
+Anvil fine-tunes two kinds of model: language models, and decision models, which answer typed
+questions about an input (yes or no, a choice, or a score) with probabilities. It runs in Docker on
+AMD GPUs.
 It covers the whole path: synthetic data from a model, data checks, training, picking the best
 checkpoint, and export to GGUF or Hugging Face.
 
