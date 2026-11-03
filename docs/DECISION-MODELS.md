@@ -8,7 +8,7 @@ SystemOne requests with it at `/v1/systemone`. Any recent llama.cpp server can r
 The files are in the run's folder, under `exports/<version>/`, for example:
 
 ```
-/run/media/zivius/mercury/anvil/data/runs/decision-0-8b-20261019-165839/exports/final/
+$ANVIL_DATA/runs/decision-0-8b-20261019-165839/exports/final/
   decision-0-8b-final-Q8_0.gguf     841 MB, closest to the trained model
   decision-0-8b-final-Q4_K_M.gguf   545 MB, smaller and a little less exact
   anvil.json                        which version this is, how it scored, how to run it
@@ -20,7 +20,7 @@ With llama.cpp's own image (CPU only, a small download):
 
 ```bash
 docker run --rm --name decision -p 8089:8080 \
-  -v /run/media/zivius/mercury/anvil/data/runs/decision-0-8b-20261019-165839/exports/final:/models:ro \
+  -v "$ANVIL_DATA/runs/decision-0-8b-20261019-165839/exports/final:/models:ro" \
   ghcr.io/ggml-org/llama.cpp:server-b11749 \
   -m /models/decision-0-8b-final-Q8_0.gguf -c 8192 -b 8192 -ub 8192 --host 0.0.0.0 --port 8080
 ```
@@ -142,10 +142,10 @@ import torch
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-sys.path.insert(0, "/home/zivius/dev/anvil/server")
+sys.path.insert(0, "/path/to/anvil/server")
 from anvil.vendor.clef.joint_schema_model import ClefModel, JointSchemaHead, systemone
 
-folder = "/run/media/zivius/mercury/anvil/data/runs/decision-0-8b-20261019-165839/model/merged"
+folder = "/path/to/anvil-data/runs/decision-0-8b-20261019-165839/model/merged"
 backbone = AutoModelForCausalLM.from_pretrained(folder, dtype=torch.bfloat16)
 head = JointSchemaHead(**json.load(open(f"{folder}/joint_head_config.json")))
 head.load_state_dict(load_file(f"{folder}/joint_head.safetensors"))
