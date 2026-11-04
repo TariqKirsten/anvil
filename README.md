@@ -20,16 +20,13 @@ checkpoint, and export to GGUF or Hugging Face.
 
 ## Why I built it
 
-I wanted to train small, task-specific models on my own GPUs, and to trust the numbers they come
-with. A training script is only one part of that:
-- The data has to be made, and checked for copies and for leaks between the splits.
-- The best checkpoint has to be picked fairly, with the test set kept out of the picking.
-- Long runs on local hardware have to survive crashes, frozen cards and power cuts.
+I would have used an existing tool such as Unsloth. When I started, it did not support ROCm 10.1,
+which my two Radeon AI PRO R9700 GPUs need for training. It also could not train on both GPUs, so
+every run took twice as long. I needed multi-GPU training, so I built my own platform for
+fine-tuning and data generation.
 
-Anvil puts all of this behind one screen. One result is decision-0.8B, a 0.8B-parameter safety
-classifier trained in Anvil. It answers five yes/no questions about a message, such as whether it
-is a harmful request, a jailbreak or a prompt injection. On its test set, their AUROC is 0.976 to
-0.998. It runs on a CPU as a GGUF ([docs/DECISION-MODELS.md](docs/DECISION-MODELS.md)).
+I have used it to fine-tune Qwen3.5 models, among them decision-0.8B, a safety classifier
+([docs/DECISION-MODELS.md](docs/DECISION-MODELS.md)).
 
 ## Key features
 
