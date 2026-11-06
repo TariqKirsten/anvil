@@ -1,8 +1,69 @@
 # Anvil guide
 
 The [README](../README.md) has the overview and the quick start. This guide describes each part of the app in detail:
-the folders, the data, pipelines, training, export and upload, several GPUs, the judge, and accounts. The app's own
-Docs page covers much of the same ground.
+setup and configuration, the folders, the data, pipelines, training, export and upload, several GPUs, the judge, and
+accounts. The app's own Docs page covers much of the same ground.
+
+## Workflow
+
+1. **Make data (optional).** Under Pipelines, start a pipeline from a template, or describe the data you want to the
+   assistant. Point its Model steps at your endpoint. Preview it, run it, then use **Train on it**.
+2. **Train.** Under New run, pick a model (a local folder or a Hugging Face repo), the data, what to train it as, LoRA
+   or full fine-tuning, and the GPUs. Then select **Start training**.
+3. **Watch and pick.** The run's page shows progress, charts, the validation checks and the scores for each question.
+   The judge keeps the best checkpoints, and the best one becomes the model.
+4. **Ship.** From the run's page, export the model as GGUF or upload it to Hugging Face.
+
+## Setup
+
+You need:
+- Linux with Docker and Docker Compose.
+- An AMD GPU that ROCm 10.1 supports. Anvil was built on two Radeon AI PRO R9700s (`gfx1201`). The image is built on
+  AMD's ROCm PyTorch image, so it does not support NVIDIA cards.
+- About 40 GB of disk for the image, and space for models, datasets and runs.
+
+Copy `.env.example` to `.env` and set `ANVIL_PASSWORD`, the four folders, `ANVIL_GPU_ARCH` and your user and group ids
+(below). Make the four folders first, so that they belong to you and not to root. With the default folders:
+
+```bash
+sudo mkdir -p /srv/anvil/{data,hf-cache,models,datasets}
+sudo chown -R "$(id -u):$(id -g)" /srv/anvil
+docker compose build          # the first build takes a while: a large ROCm image, and kernels compiled for your GPU
+docker compose up -d app
+```
+
+Open `http://localhost:8420` (or `http://<this machine>:8420`) and log in as `admin`, with the password from
+`ANVIL_PASSWORD`.
+
+### Configuration
+
+`.env` holds the settings ([.env.example](../.env.example) has placeholders and notes). Compose passes it to the
+container.
+
+| Variable | What it sets |
+|---|---|
+| `ANVIL_PASSWORD` | The first password of the `admin` account, used once, on the first start. Change it in the app after that. |
+| `ANVIL_RESET_PASSWORD` | Set it to `1`, with a new `ANVIL_PASSWORD`, and restart to reset a forgotten password. Then remove it. |
+| `ANVIL_DATA` | The host folder for Anvil's own data: accounts, runs, uploaded datasets and pipelines (`/data`). |
+| `ANVIL_HF_CACHE` | The host folder for the Hugging Face cache (`/hf-cache`). |
+| `ANVIL_MODELS` | A host folder of local models to pick from (`/models`). |
+| `ANVIL_DATASETS` | A host folder of dataset files to pick from (`/datasets`). |
+| `HF_TOKEN` | Optional: a Hugging Face token for everyone on this Anvil. Usually each account adds its own in Settings. |
+| `ANVIL_GPU_ARCH` | Your GPU's architecture, for the kernels compiled into the image: `gfx1201` for an R9700, `gfx1100` for an RX 7900. Rebuild after you change it. |
+| `ANVIL_UID`, `ANVIL_GID` | Your user and group ids (`id -u`, `id -g`), so that the files the container writes belong to you. |
+| `ANVIL_SAFE_KERNELS` | Set it to `1` to switch off the fast linear-attention kernels if a model misbehaves. |
+
+In the app, Settings holds your password, your Hugging Face token, the assistant's model endpoint and key, and the
+address that Anvil calls to free shared GPUs. API keys stay on the server and are never sent back to the browser.
+
+### Development
+
+`docker compose up dev` serves the app with live reload at `http://localhost:5173`. Run the tests with:
+
+```bash
+docker compose exec -w /workspace/server dev python -m pytest
+docker compose exec dev npm --prefix web run typecheck
+```
 
 ## Folders
 
@@ -82,7 +143,8 @@ dataset in one of the formats above.
 - The assistant is any OpenAI-compatible model that can call tools, set up once in Settings: its address, key, model,
   context, thinking and reasoning effort.
 - Describe the data you want, and it asks what it needs to know, proposes the steps and builds them when you say so. A
-  clear change that you ask for, it just makes. It only previews: a full run is yours to start.
+  clear change that you ask for, it just makes. It only previews: a full run is yours to start. In a live test, it
+  built a yes/no fraud pipeline from one sentence in about 2 minutes.
 - Each message starts a turn in a process of its own (`anvil.assistant`), so a turn outlives a restart of the server.
   A turn asks the model, carries out the tools it calls (building the pipeline, adding, changing and removing steps,
   previewing, listing models and datasets, looking at a dataset or a template), and asks again until the model answers
