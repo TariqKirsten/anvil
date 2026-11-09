@@ -609,8 +609,8 @@ def test_several_cards_start_through_torchrun():
     one = runs.command("anvil.train", Path("/data/runs/r"), 1, ["--resume"])
     assert one[1:] == ["-m", "anvil.train", "/data/runs/r", "--resume"]
     two = runs.command("anvil.train", Path("/data/runs/r"), 2, [])
-    assert two[1:] == ["-m", "torch.distributed.run", "--standalone", "--nproc-per-node=2", "-m", "anvil.train",
-                       "/data/runs/r"]
+    assert two[1:] == ["-m", "torch.distributed.run", "--standalone", "--local-addr=127.0.0.1", "--nproc-per-node=2",
+                       "-m", "anvil.train", "/data/runs/r"]
 
 
 def test_a_judge_still_checking_after_stop_keeps_its_card_and_serves_the_resume(run_settings, monkeypatch):

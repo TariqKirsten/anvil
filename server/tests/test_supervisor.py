@@ -293,8 +293,9 @@ def test_a_trainer_that_dies_after_stop_is_not_started_again(tmp_path):
 def test_each_card_hears_stop_and_a_deaf_run_is_ended_whole(tmp_path):
     run = tmp_path / "run"
     (tmp_path / "card.py").write_text(CARD)
-    proc = supervise(run, [], [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nproc-per-node=2",
-                               str(tmp_path / "card.py"), str(run)])
+    # --local-addr as runs.command has it: on a tailnet the hostname can name another machine, and the cards never meet
+    proc = supervise(run, [], [sys.executable, "-m", "torch.distributed.run", "--standalone", "--local-addr=127.0.0.1",
+                               "--nproc-per-node=2", str(tmp_path / "card.py"), str(run)])
     wait_for(lambda: (run / "card-0").exists() and (run / "card-1").exists(), timeout=120)
     cards = [int((run / f"card-{rank}").read_text()) for rank in (0, 1)]
     asked = press_stop(proc, run, end_in=2)
