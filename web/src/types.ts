@@ -107,6 +107,14 @@ export interface Problem {
   reason: string;
 }
 
+// A column rows can be kept together by (server/anvil/datasets.py, group_choices): the file's own, or a key of the
+// meta a pipeline writes. values: how many different ones the first rows hold. answer: it only says the answer again.
+export interface GroupChoice {
+  name: string;
+  values: number;
+  answer: boolean;
+}
+
 export interface DatasetInfo {
   rows: number;
   columns: string[];
@@ -116,6 +124,9 @@ export interface DatasetInfo {
   checked: number;
   invalid: number | null;
   examples: Problem[];
+  groups?: GroupChoice[];
+  // Decision data: each question's answers in the checked rows, with how often each is the gold one.
+  answers?: Record<string, Record<string, number>> | null;
 }
 
 export interface PrepareReport {
@@ -124,12 +135,18 @@ export interface PrepareReport {
   rows: Record<Slot, number>;
   invalid: Partial<Record<Slot, number>>;
   examples: Partial<Record<Slot, Problem[]>>;
-  removed: Partial<Record<Slot, { exact: number; near: number; conflicts: number }>>;
+  // near: data prepared before Prepare data stopped looking for near-copies.
+  removed: Partial<Record<Slot, { exact: number; near?: number; conflicts: number }>>;
   leaks: Partial<Record<Slot, number>>;
   // Decision data: the questions in train, which is what a training step's batch counts (rows can hold several).
   items?: { train: number };
   // Decision data: each question the validation set asks, its type and how many rows ask it.
   questions?: Record<string, { type: QuestionType; rows: number }>;
+  // Decision data: how many rows of each split have each answer, per question.
+  answers?: Record<string, Record<string, Record<Slot, number>>>;
+  // What the split did: rows kept together by "input", "nothing" or "column:<name>", and whether answers were shared.
+  keep_together?: string;
+  balanced?: boolean;
   given: { validation: boolean; test: boolean };
   notes: string[];
   seconds: number;

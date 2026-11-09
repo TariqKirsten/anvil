@@ -91,11 +91,22 @@ of a Hugging Face dataset. Its format is recognised from its columns:
 | Prompt and completion | `prompt`, `completion` |
 | Plain text | `text` |
 
-**Prepare data** checks every row, removes exact and near-copies (MinHash over word trigrams, 70% shared), drops
-validation or test rows that share an input with train, and cuts whatever split you didn't give from train. Rows that
-share an input stay on one side of the split. For decision data it also says which questions the validation set
-asks, by type, since that decides what the checks can score. The result is cached: preparing the same data with the
-same settings again is instant.
+**Prepare data** checks every row, removes exact copies (the same input and output after lowercasing and joining
+up whitespace), drops validation or test rows whose input train has too, and cuts whatever split you didn't give from
+train. It doesn't look for near-copies: judged on a whole input, text every row shares (a question on screen, a system
+prompt) outweighs the part that differs, so that's left to whatever made the data, such as a pipeline's Dedupe step
+on the column a model wrote.
+
+The split moves whole groups at a time, so a group never sits on both sides. **Keep together** picks the groups: rows
+with the same input (the default), the same value of a column as well (the file's own, or a key of the `meta` a
+pipeline writes, such as the List value a row was made from, so the test holds values the model never saw), or
+nothing.
+Columns that only repeat the answer aren't offered, since keeping them together would put every row with one answer
+on the same side. For decision data, **Balance by answer** (on by default) gives each answer of each question its
+share of validation and test, the rarest first; an answer too rare for a share stays in train, and the summary says
+so. The summary lists each question's answers in each split and which questions the validation set asks, by type,
+since that decides what the checks can score. The result is cached: preparing the same data with the same settings
+again is instant.
 
 ## Pipelines: making data
 
@@ -112,7 +123,7 @@ dataset in one of the formats above.
 | Generate | The model writes text from a prompt with `{{ column }}` slots; asked for several, it answers with a JSON list and each item becomes a row |
 | Question | A decision question (yes/no, choice or score), answered by the model or taken from a column through a mapping |
 | Filter | Keeps the rows that pass its rules (is, contains, matches, longer or shorter than, empty), every rule or any |
-| Dedupe | Drops exact and near-copies of a column, by Prepare data's rule |
+| Dedupe | Drops exact and near-copies (70% of word trigrams shared) of a column: point it at the text a model wrote |
 | Save | Writes the rows (decision, chat, prompt and completion, or text), optionally balanced by a List's values or a Question's answers |
 
 - A step asks the Model its line starts from, unless another Model is plugged into its diamond handle (a dashed line).
@@ -129,7 +140,7 @@ dataset in one of the formats above.
   dropped, live on the canvas.
 - A run's datasets go to `ANVIL_DATA/datasets/generated/<name>-<run>.jsonl`, which New run's data picker lists, and
   **Train on it** opens New run with one chosen. Every row also gets `source` (the pipeline and the List values that
-  made it, for Keep together by source) and `meta` (all its columns, as JSON).
+  made it) and `meta` (all its columns, as JSON); Prepare data can keep rows together by either.
 - **New pipeline** offers six templates (`server/anvil/templates.py`), each a working pipeline with a note on every
   step: labelling messages you have, writing a yes/no dataset from scratch, routing to a team (a choice
   question), several questions per message, chat replies for a language model, and harmless Afrikaans and isiZulu

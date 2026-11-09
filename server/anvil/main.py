@@ -249,10 +249,10 @@ class PrepareBody(BaseModel):
     validation: dict | None = None
     test: dict | None = None
     dedupe: bool = True
-    near_copies: bool = True
     val_percent: float = 5
     test_percent: float = 5
-    keep_together: str = "input"
+    keep_together: str = "input"  # input, nothing, or column:<name>
+    balance: bool = True  # decision data: each answer gets its share of validation and test
     seed: int = 3407
 
 
@@ -261,8 +261,9 @@ def prepare_dataset(body: PrepareBody, request: Request, run: bool = True) -> di
     """Start preparing (or find the earlier result). With run=false it only looks for an earlier result."""
     if not (0 <= body.val_percent <= 40 and 0 <= body.test_percent <= 40):
         raise HTTPException(400, "Use 0 to 40% for the validation and test splits.")
-    if body.keep_together not in ("input", "source", "nothing"):
-        raise HTTPException(400, "Keep rows together by input, source or nothing.")
+    together = body.keep_together
+    if together not in ("input", "source", "nothing") and not (together.startswith("column:") and together[7:].strip()):
+        raise HTTPException(400, "Keep rows together by input, a column (column:<name>) or nothing.")
     try:
         job = datasets.start(body.model_dump(), hf_token(request), run=run)
     except Exception as exc:

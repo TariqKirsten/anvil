@@ -1117,6 +1117,27 @@ a.brand {
   gap: 6px;
 }
 
+/* How many rows of each split have each answer, under Prepare data's summary. */
+.answers {
+  font-size: 13px;
+}
+
+.answers summary {
+  color: var(--accent-text);
+  cursor: pointer;
+}
+
+.answers .table-scroll {
+  margin-top: 8px;
+}
+
+.answers .answers-question th {
+  padding-top: 12px;
+  color: var(--text);
+  font-weight: 600;
+  text-align: left;
+}
+
 /* ---- pages, runs */
 
 .nav {

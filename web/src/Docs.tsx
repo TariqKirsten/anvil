@@ -385,9 +385,11 @@ export function Docs({ part, onLogout }: { part: string | null; onLogout: () => 
             share are dropped. Without it, whatever the model writes most fills the most.
           </li>
           <li>
-            <strong>Dedupe</strong> drops copies and near-copies by the rule Prepare data uses (70% of three-word runs
-            shared). Models repeat themselves, more so with few List values to vary: more topics or tones mean fewer
-            copies.
+            <strong>Dedupe</strong> drops copies and near-copies (70% of three-word runs shared). Point it at the
+            column a model wrote, not one that wraps it in text every row shares: after the same &quot;Asked: …&quot;,
+            two short replies share most of their three-word runs whatever they say. Models repeat themselves, more so
+            with few List values to vary: more topics or tones mean fewer copies. Prepare data only removes exact
+            copies, so near-copies are this step's job.
           </li>
           <li>
             <strong>Preview, then Run.</strong> A preview makes 5 rows for each Save and shows each row's way through
@@ -399,9 +401,10 @@ export function Docs({ part, onLogout }: { part: string | null; onLogout: () => 
           <li>
             <strong>What a saved row holds.</strong> The dataset's own columns (state, questions and gold for a decision
             model; messages; prompt and completion; or text), plus <code>source</code>, the pipeline and the List values
-            that made the row, and <code>meta</code>, every column as JSON. Prepare data's Keep together by source then
-            keeps each mix of List values on one side of the split, so the test set holds mixes the model never trained
-            on.
+            that made the row, and <code>meta</code>, every column as JSON. Prepare data's Keep together offers
+            source and each column in meta: by a List's column, such as the question on screen, each of its values
+            stays on one side of the split, so the test holds values the model never trained on. Columns that only say
+            the answer again aren't offered.
           </li>
         </ul>
       </Section>

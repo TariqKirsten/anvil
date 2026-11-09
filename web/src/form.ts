@@ -23,10 +23,12 @@ export interface FormState {
     validation: DataSource | null;
     test: DataSource | null;
     dedupe: boolean;
-    nearCopies: boolean;
     valPercent: number;
     testPercent: number;
-    keepTogether: "input" | "source" | "nothing";
+    // Rows that stay on one side of the split: the same input, the same value of a column ("column:<name>"), or none.
+    keepTogether: string;
+    // Decision data: each answer gets its share of validation and test.
+    balance: boolean;
   };
   hyper: {
     learningRate: string;
@@ -110,10 +112,10 @@ export const DEFAULTS: FormState = {
     validation: null,
     test: null,
     dedupe: true,
-    nearCopies: true,
     valPercent: 5,
     testPercent: 5,
     keepTogether: "input",
+    balance: true,
   },
   hyper: {
     learningRate: "2e-4",
@@ -143,11 +145,14 @@ export function loadForm(): FormState {
     const saved = JSON.parse(localStorage.getItem(KEY) ?? "null");
     if (!saved || typeof saved !== "object") return DEFAULTS;
     // Saved forms from older versions miss newer fields, so fill them from the defaults.
+    const data = { ...DEFAULTS.data, ...saved.data };
+    delete data.nearCopies; // Prepare data stopped looking for near-copies
+    if (data.keepTogether === "source") data.keepTogether = "column:source";
     return {
       ...DEFAULTS,
       ...saved,
       model: { ...DEFAULTS.model, ...saved.model },
-      data: { ...DEFAULTS.data, ...saved.data },
+      data,
       hyper: { ...DEFAULTS.hyper, ...saved.hyper },
       checkpoints: { ...DEFAULTS.checkpoints, ...saved.checkpoints },
     };
@@ -176,10 +181,10 @@ export function prepareRequest(form: FormState) {
     validation: source(d.validation),
     test: source(d.test),
     dedupe: d.dedupe,
-    near_copies: d.nearCopies,
     val_percent: d.valPercent,
     test_percent: d.testPercent,
     keep_together: d.keepTogether,
+    balance: d.balance,
     seed: form.hyper.seed,
   };
 }

@@ -8,7 +8,7 @@ solid arrows (rows edges), and each step adds a column to every row or drops som
 - generate  the model writes text from a prompt with {{ column }} slots: one row per reply, or several
 - question  a decision question (yes/no, choice or score) answered for each row, by the model or from a column
 - filter    keeps only the rows that pass its rules
-- dedupe    drops copies and near-copies of a column, by the rule Prepare data uses
+- dedupe    drops copies and near-copies (70% of word trigrams shared) of a column
 - save      ends a line: writes its rows as an anvil dataset (decision, chat, prompt and completion, or text),
             optionally with an equal share of rows for each value of a List's column or a Question's answer
 

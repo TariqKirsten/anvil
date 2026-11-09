@@ -106,11 +106,11 @@ def test_prepare_removes_copies_and_keeps_states_on_one_side(data_settings):
     path = data_settings.dataset_roots[0] / "train.parquet"
     decision_dataset().to_parquet(path)
     report = run({"train": {"kind": "file", "path": str(path)}, "val_percent": 10, "test_percent": 10,
-                  "dedupe": True, "near_copies": True, "keep_together": "input", "seed": 1}, data_settings)
+                  "dedupe": True, "keep_together": "input", "seed": 1}, data_settings)
     assert report["format"] == "decision"
     assert report["invalid"]["train"] == 1
-    assert report["removed"]["train"] == {"exact": 1, "near": 1, "conflicts": 1}
-    assert sum(report["rows"].values()) == 120
+    assert report["removed"]["train"] == {"exact": 1, "conflicts": 0}  # the near-copy stays: it's a row of its own
+    assert sum(report["rows"].values()) == 121
     out = data_settings.prepared / "out"
     states = {s: set(pd.read_parquet(out / f"{s}.parquet")["state"]) for s in datasets.SPLITS}
     assert not states["train"] & states["test"] and not states["train"] & states["validation"]
@@ -121,6 +121,11 @@ def test_prepare_removes_copies_and_keeps_states_on_one_side(data_settings):
     asked = [name for q in validation["questions"] for name in json.loads(q)]
     assert report["questions"] == {"bad": {"type": "noul", "rows": asked.count("bad")},
                                    "kind": {"type": "choice", "rows": asked.count("kind")}}
+    for split in datasets.SPLITS:  # every row's answers, counted where the row went
+        frame = pd.read_parquet(out / f"{split}.parquet")
+        golds = [json.loads(g) for g in frame["gold"]]
+        assert report["answers"]["bad"]["true"][split] == sum(g.get("bad") is True for g in golds)
+        assert report["answers"]["kind"]["a"][split] == sum("kind" in g for g in golds)
 
 
 def test_data_prepared_before_reports_listed_questions_gets_the_list(data_settings):
@@ -133,38 +138,182 @@ def test_data_prepared_before_reports_listed_questions_gets_the_list(data_settin
     assert "questions" in json.loads((folder / "report.json").read_text())  # saved, so it's worked out once
 
 
-def test_near_copies_stay_together_even_when_kept(data_settings):
-    path = data_settings.dataset_roots[0] / "train.parquet"
-    decision_dataset().to_parquet(path)
-    report = run({"train": {"kind": "file", "path": str(path)}, "val_percent": 20, "test_percent": 20,
-                  "dedupe": True, "near_copies": False, "keep_together": "input", "seed": 3}, data_settings)
-    assert report["removed"]["train"] == {"exact": 1, "near": 0, "conflicts": 0}
-    out = data_settings.prepared / "out"
-    where = {}
-    for split in datasets.SPLITS:
-        for state in pd.read_parquet(out / f"{split}.parquet")["state"]:
-            where.setdefault(json.loads(state)["message"].split()[1], set()).add(split)
-    # sentence 1 and its near-copy share every word but the first, so key on the second word
-    assert len(where[f"{WORDS[8]}1"]) == 1
-
-
 def test_the_same_seed_gives_the_same_split():
     groups = [i // 2 for i in range(100)]
     rows = pd.Series(range(100)).to_numpy()
-    a = datasets.split_groups(groups, rows, 0.1, 0.1, seed=7)
-    b = datasets.split_groups(groups, rows, 0.1, 0.1, seed=7)
-    c = datasets.split_groups(groups, rows, 0.1, 0.1, seed=8)
-    assert all((a[s] == b[s]).all() for s in a) and any(len(a[s]) != len(c[s]) or (a[s] != c[s]).any() for s in a)
+    answers = [[("q", "yes" if i % 3 else "no")] for i in range(100)]
+    for given in (None, answers):
+        a = datasets.split_groups(groups, rows, 0.1, 0.1, seed=7, answers=given)
+        b = datasets.split_groups(groups, rows, 0.1, 0.1, seed=7, answers=given)
+        c = datasets.split_groups(groups, rows, 0.1, 0.1, seed=8, answers=given)
+        assert all((a[s] == b[s]).all() for s in a) and any(len(a[s]) != len(c[s]) or (a[s] != c[s]).any() for s in a)
+        assert sorted(sum((list(a[s]) for s in a), [])) == list(range(100))  # every row once
+
+
+def answered(answer, n, start=0, question="intent"):
+    """n rows with this answer to a choice question, each with a state of its own."""
+    q = {question: {"type": "choice", "instructions": "Which?", "criteria": {k: k for k in "abcd"}}}
+    return [row(f"message {start + i} for {answer}", q, {question: answer}) for i in range(n)]
+
+
+def counts(out, split, question="intent"):
+    frame = pd.read_parquet(out / f"{split}.parquet")
+    found = {}
+    for gold in frame["gold"]:
+        answer = json.loads(gold).get(question)
+        if answer is not None:
+            found[answer] = found.get(answer, 0) + 1
+    return found
+
+
+def test_every_answer_gets_its_share_of_validation_and_test(data_settings):
+    path = data_settings.dataset_roots[0] / "train.jsonl"
+    rows = answered("a", 100) + answered("b", 60) + answered("c", 30) + answered("d", 10)
+    pd.DataFrame(rows).to_json(path, orient="records", lines=True)
+    report = run({"train": {"kind": "file", "path": str(path)}, "val_percent": 10, "test_percent": 10, "seed": 5},
+                 data_settings)
+    out = data_settings.prepared / "out"
+    assert report["balanced"] and report["rows"] == {"train": 160, "validation": 20, "test": 20}
+    for split in ("validation", "test"):
+        assert counts(out, split) == {"a": 10, "b": 6, "c": 3, "d": 1}
+        assert {a: c[split] for a, c in report["answers"]["intent"].items()} == {"a": 10, "b": 6, "c": 3, "d": 1}
+    assert list(report["answers"]["intent"]) == ["a", "b", "c", "d"]  # most common first
+
+
+def test_rows_after_the_same_question_are_not_copies(data_settings):
+    """A generated state wraps a short reply in text every row shares. The replies are different rows, whatever the
+    wrapping: none is dropped, and each answer still gets its share."""
+    path = data_settings.dataset_roots[0] / "train.jsonl"
+    q = {"intent": {"type": "choice", "instructions": "Which?", "criteria": {"Yes": "y", "No": "n"}}}
+    replies = {"Yes": ["yup", "ya", "go ahead", "sure", "ok do it"], "No": ["nah", "nope", "not now", "skip it", "no"]}
+    asks = [f"Send the {thing} now?" for thing in ("letter", "invoice", "quote", "report")]
+    rows = [row(f"Asked: {ask} | User typed: {reply}", q, {"intent": answer})
+            for ask in asks for answer, typed in replies.items() for reply in typed]
+    pd.DataFrame(rows).to_json(path, orient="records", lines=True)
+    report = run({"train": {"kind": "file", "path": str(path)}, "val_percent": 10, "test_percent": 10}, data_settings)
+    assert report["removed"]["train"] == {"exact": 0, "conflicts": 0} and sum(report["rows"].values()) == 40
+    assert counts(data_settings.prepared / "out", "validation") == {"Yes": 2, "No": 2}
+
+
+def test_rows_answering_several_questions_share_each_answer(data_settings):
+    path = data_settings.dataset_roots[0] / "train.jsonl"
+    both = {**NOUL, **CHOICE}
+    rows = [row(f"text {i}", both, {"bad": i % 4 == 0, "kind": None if i % 5 == 0 else "ab"[i % 2]})
+            for i in range(400)]
+    pd.DataFrame(rows).to_json(path, orient="records", lines=True)
+    report = run({"train": {"kind": "file", "path": str(path)}, "val_percent": 10, "test_percent": 10, "seed": 2},
+                 data_settings)
+    for question, answers in report["answers"].items():
+        for answer, where in answers.items():
+            total = sum(where.values())
+            for split in ("validation", "test"):  # within a row of its share, though rows carry both questions
+                assert abs(where[split] - total / 10) <= 1.5, (question, answer, where)
+
+
+def test_an_answer_too_rare_to_share_stays_in_train_and_says_so(data_settings):
+    path = data_settings.dataset_roots[0] / "train.jsonl"
+    pd.DataFrame(answered("a", 200) + answered("d", 3)).to_json(path, orient="records", lines=True)
+    report = run({"train": {"kind": "file", "path": str(path)}, "val_percent": 5, "test_percent": 5}, data_settings)
+    assert report["answers"]["intent"]["d"] == {"train": 3, "validation": 0, "test": 0}
+    assert any(n.startswith("Validation has no rows with intent d (3 rows in all)") for n in report["notes"])
+
+
+def test_rows_can_be_kept_together_by_a_column_or_a_key_of_meta(data_settings):
+    path = data_settings.dataset_roots[0] / "train.jsonl"
+    rows = []
+    for i in range(300):
+        r = row(f"reply {i}", NOUL, {"bad": (i // 12) % 2 == 0})  # every topic and question gets both answers
+        r["topic"] = f"topic {i % 12}"
+        r["meta"] = json.dumps({"ask": f"question {i % 15}", "style": "short"})
+        rows.append(r)
+    pd.DataFrame(rows).to_json(path, orient="records", lines=True)
+    for column, key in (("topic", "topic"), ("ask", "meta")):
+        report = run({"train": {"kind": "file", "path": str(path)}, "val_percent": 10, "test_percent": 10,
+                      "keep_together": f"column:{column}"}, data_settings, name=column)
+        assert report["keep_together"] == f"column:{column}" and not report["notes"]
+        where: dict = {}
+        for split in datasets.SPLITS:
+            frame = pd.read_parquet(data_settings.prepared / column / f"{split}.parquet")
+            values = frame[column] if key == column else [json.loads(m)[column] for m in frame["meta"]]
+            for value in values:
+                where.setdefault(value, set()).add(split)
+        assert all(len(splits) == 1 for splits in where.values())
+        assert report["rows"]["validation"] and report["rows"]["test"]
+
+
+def test_rows_with_the_same_state_stay_together_whatever_their_column_says(data_settings):
+    path = data_settings.dataset_roots[0] / "train.jsonl"
+    rows = []
+    for i in range(200):
+        for questions, gold, source in ((NOUL, {"bad": i % 2 == 0}, f"first {i}"), (CHOICE, {"kind": "a"}, f"second {i}")):
+            r = row(f"message {i}", questions, gold)  # the same state twice, under two sources
+            r["source"] = source
+            rows.append(r)
+    pd.DataFrame(rows).to_json(path, orient="records", lines=True)
+    report = run({"train": {"kind": "file", "path": str(path)}, "val_percent": 10, "test_percent": 10,
+                  "keep_together": "column:source"}, data_settings)
+    where: dict = {}
+    for split in datasets.SPLITS:
+        for state in pd.read_parquet(data_settings.prepared / "out" / f"{split}.parquet")["state"]:
+            where.setdefault(state, set()).add(split)
+    assert report["rows"]["validation"] and all(len(splits) == 1 for splits in where.values())
+
+
+def test_a_split_of_few_big_groups_still_gets_one(data_settings):
+    """Three sources, each far bigger than validation's 5%: validation and test still get one each, not nothing."""
+    path = data_settings.dataset_roots[0] / "train.jsonl"
+    rows = []
+    for i in range(600):
+        r = row(f"message {i}", NOUL, {"bad": i % 4 == 0})
+        r["source"] = ["aegis", "wild", "civil"][i % 3]
+        rows.append(r)
+    pd.DataFrame(rows).to_json(path, orient="records", lines=True)
+    report = run({"train": {"kind": "file", "path": str(path)}, "keep_together": "column:source"}, data_settings)
+    assert report["rows"] == {"train": 200, "validation": 200, "test": 200}
+    assert "Validation has 200 rows rather than 30, because the rows kept together come in big groups." in report["notes"]
+
+
+def test_an_answer_train_never_gets_is_said(data_settings):
+    """Kept together by a source per answer: train keeps one source, so it lacks an answer, and the notes say so."""
+    path = data_settings.dataset_roots[0] / "train.jsonl"
+    rows = []
+    for i in range(300):
+        r = row(f"message {i}", CHOICE, {"kind": "b" if i % 3 == 0 else "a"})
+        r["source"] = ["aegis", "wild", "civil"][i % 3]  # every "b" is aegis
+        rows.append(r)
+    pd.DataFrame(rows).to_json(path, orient="records", lines=True)
+    report = run({"train": {"kind": "file", "path": str(path)}, "keep_together": "column:source", "seed": 1},
+                 data_settings)
+    # each split gets one whole source, so train holds one answer only: either way the other is named
+    absent = [answer for answer, where in report["answers"]["kind"].items() if not where["train"]]
+    assert len(absent) == 1
+    rows_in_all = 100 if absent[0] == "b" else 200
+    assert (f"Train has no rows with kind {absent[0]} ({rows_in_all} rows in all), so the model can't learn that "
+            "answer.") in report["notes"]
+
+
+def test_keeping_together_by_a_column_train_lacks_keeps_states_together(data_settings):
+    path = data_settings.dataset_roots[0] / "train.parquet"
+    decision_dataset().to_parquet(path)
+    report = run({"train": {"kind": "file", "path": str(path)}, "keep_together": "column:ask"}, data_settings)
+    assert report["keep_together"] == "input"
+    assert report["notes"][0] == "Train has no ask column, so rows with the same state were kept together instead."
+
+
+def test_keep_together_by_source_means_the_source_column():
+    assert datasets.options({"keep_together": "source"})["keep_together"] == "column:source"
+    assert datasets.options({})["keep_together"] == "input" and datasets.options({})["balance"] is True
 
 
 def test_a_test_file_loses_rows_it_shares_with_train(data_settings):
     root = data_settings.dataset_roots[0]
     pd.DataFrame([row(sentence(i)) for i in range(20)]).to_parquet(root / "train.parquet")
-    pd.DataFrame([row(sentence(5)), row(sentence(100)), row(sentence(101))]).to_json(
+    near = sentence(6).replace(f"{WORDS[(6 * 7) % 26]}6", "changed", 1)  # one word of sentence 6 changed: kept
+    pd.DataFrame([row(sentence(5)), row(sentence(100)), row(near)]).to_json(
         root / "test.jsonl", orient="records", lines=True)
     report = run({"train": {"kind": "file", "path": str(root / "train.parquet")},
                   "test": {"kind": "file", "path": str(root / "test.jsonl")},
-                  "val_percent": 10, "dedupe": True, "near_copies": True, "keep_together": "input"}, data_settings)
+                  "val_percent": 10, "dedupe": True, "keep_together": "input"}, data_settings)
     assert report["leaks"]["test"] == 1 and report["rows"]["test"] == 2 and report["given"]["test"]
 
 
@@ -209,6 +358,25 @@ def test_inspect_shows_format_and_problems(data_settings):
     info = logged_in().post("/api/datasets/inspect", json={"source": {"kind": "file", "path": str(path)}}).json()
     assert info["rows"] == 123 and info["format"] == "decision" and info["invalid"] == 1
     assert info["preview"][0]["state"].startswith('{"message"')
+    assert info["answers"] == {"bad": {"true": 32, "false": 30}, "kind": {"a": 60}}
+
+
+def test_inspect_offers_the_columns_rows_can_be_kept_together_by(data_settings):
+    path = data_settings.dataset_roots[0] / "made.jsonl"
+    rows = []
+    for i in range(40):
+        label = "yes" if i % 2 else "no"
+        r = row(f"Asked: question {i % 5}? | User typed: reply {i}", NOUL, {"bad": label == "yes"})
+        r["source"] = f"pipe|label={label}|ask=question {i % 5}"
+        r["meta"] = json.dumps({"label": label, "ask": f"question {i % 5}", "id": i, "style": "short",
+                                "state": "the generated text"})
+        rows.append(r)
+    pd.DataFrame(rows).to_json(path, orient="records", lines=True)
+    info = logged_in().post("/api/datasets/inspect", json={"source": {"kind": "file", "path": str(path)}}).json()
+    # id differs in every row and style never does, so neither keeps anything apart; meta's state is the state column
+    assert info["groups"] == [{"name": "source", "values": 10, "answer": False},
+                              {"name": "label", "values": 2, "answer": True},
+                              {"name": "ask", "values": 5, "answer": False}]
 
 
 def test_prepare_job_runs_then_is_cached(data_settings):
@@ -226,6 +394,16 @@ def test_prepare_job_runs_then_is_cached(data_settings):
     assert job["state"] == "done", job
     again = c.post("/api/datasets/prepare", params={"run": "false"}, json=body).json()["job"]
     assert again["state"] == "done" and again["report"] == job["report"]
+
+
+def test_keep_together_takes_input_nothing_or_a_column(data_settings):
+    path = data_settings.dataset_roots[0] / "train.parquet"
+    decision_dataset().to_parquet(path)
+    c = logged_in()
+    body = {"train": {"kind": "file", "path": str(path)}}
+    for together, status in (("column:ask", 200), ("source", 200), ("nothing", 200), ("column:", 400), ("ask", 400)):
+        response = c.post("/api/datasets/prepare", params={"run": "false"}, json={**body, "keep_together": together})
+        assert response.status_code == status, together
 
 
 def test_the_fingerprint_ignores_how_numbers_are_written():

@@ -25,7 +25,7 @@ export const STEPS: Record<StepType, { label: string; about: string; icon: React
     icon: <IconMessageQuestion size={15} aria-hidden /> },
   filter: { label: "Filter", about: "Keeps only the rows that pass its rules.",
     icon: <IconFilter size={15} aria-hidden /> },
-  dedupe: { label: "Dedupe", about: "Drops copies and near-copies, by the rule Prepare data uses.",
+  dedupe: { label: "Dedupe", about: "Drops copies and near-copies of the text a model wrote.",
     icon: <IconCopyOff size={15} aria-hidden /> },
   save: { label: "Save", about: "Ends a line: writes its rows as an anvil dataset.",
     icon: <IconDeviceFloppy size={15} aria-hidden /> },

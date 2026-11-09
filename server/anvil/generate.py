@@ -53,6 +53,8 @@ STUCK = 400  # rows started since a Save last kept one: something drops (nearly)
 FAILING = (20, 10)  # 10 failures in a model's last 20 requests: the endpoint is down or refusing
 LIST_ASK = "\n\nAnswer with a JSON array of {n} strings, one for each, and nothing else."
 SURE = "Set sure to false if the text could fairly be read either way."
+NUM_PERM = 64  # MinHash permutations for near-copies
+SIMILAR = 0.7  # word-trigram Jaccard similarity from which two texts are near-copies
 
 _templates = SandboxedEnvironment(undefined=StrictUndefined, keep_trailing_newline=True)
 _compiled: dict = {}
@@ -187,9 +189,17 @@ class Seed:
             return self.rows[self.used - 1]
 
 
+def shingles(text: str) -> set[bytes]:
+    """A text's runs of three words, what near-copies are compared on."""
+    words = text.split()
+    return {" ".join(words[i:i + 3]).encode() for i in range(max(1, len(words) - 2))}
+
+
 class Copies:
     """What a Dedupe step has let through: exact copies after normalising, and near-copies by MinHash over word
-    trigrams sharing at least 70%, the rule Prepare data uses."""
+    trigrams sharing at least 70% (the guard builder's rule). Point it at the column a model wrote, not one that wraps
+    it in text every row shares: in "Asked: <question> | User typed: <reply>", two short replies to the same question
+    share most of their trigrams whatever they say."""
 
     def __init__(self, near: bool):
         self.near = near
@@ -200,7 +210,7 @@ class Copies:
         if near:
             from datasketch import MinHashLSH
 
-            self.lsh = MinHashLSH(threshold=datasets.SIMILAR, num_perm=datasets.NUM_PERM)
+            self.lsh = MinHashLSH(threshold=SIMILAR, num_perm=NUM_PERM)
 
     def check(self, text: str) -> str | None:
         """Why this text is a copy, or None after remembering it."""
@@ -209,14 +219,14 @@ class Copies:
         if self.near:
             from datasketch import MinHash
 
-            minhash = MinHash(num_perm=datasets.NUM_PERM)
-            minhash.update_batch(list(datasets._shingles(text)))
+            minhash = MinHash(num_perm=NUM_PERM)
+            minhash.update_batch(list(shingles(text)))
         with self.lock:
             if text in self.exact:
                 return "a copy of an earlier row"
             if minhash is not None:
                 for j in self.lsh.query(minhash):
-                    if self.hashes[j].jaccard(minhash) >= datasets.SIMILAR:
+                    if self.hashes[j].jaccard(minhash) >= SIMILAR:
                         return "a near-copy of an earlier row"
                 self.lsh.insert(len(self.hashes), minhash)
                 self.hashes.append(minhash)
@@ -613,8 +623,9 @@ class Run:
 
     def make_record(self, node: str, cfg: dict, row: dict) -> dict:
         """The row in its dataset's format, checked by the rules Prepare data uses, plus where it came from: source
-        (the pipeline and the list values that made it, so Prepare data's "keep together by source" keeps each mix
-        on one side of the split) and meta (every column, as JSON)."""
+        (the pipeline and the list values that made it) and meta (every column, as JSON). Prepare data can keep rows
+        together by either: by source, each mix of List values stays on one side of the split; by a key of meta, such
+        as a List's column, each of its values does."""
         lists = [self.nodes[n]["config"]["column"] for n in self.graph.above(node, "list")]
         source = "|".join([self.pipeline["name"], *(f"{c}={text_of(row.get(c))}" for c in lists)])
         extra = {"source": source, "meta": json.dumps(row, ensure_ascii=False, default=str)}

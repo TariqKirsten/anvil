@@ -1,12 +1,13 @@
 // Train, validation and test data. Validation and test are optional: whatever you don't provide is cut from train.
 // Choosing a dataset shows its size, format and first rows at once. "Prepare data" then checks every row, removes
-// duplicates (by default), keeps rows that share an input on one side of the split, and reports what it did.
+// exact copies (by default), keeps rows that share an input (or a column's value) on one side of the split, gives
+// each answer its share of validation and test (decision data), and reports what it did.
 
 import { IconCircleCheck, IconDatabase, IconFile, IconX } from "@tabler/icons-react";
 import { useEffect, useRef, useState } from "react";
 import { api, isAbort } from "../api";
 import { prepareRequest, type FormState, type SectionProps } from "../form";
-import type { DataSource, DatasetInfo, PrepareJob, PrepareReport, Slot } from "../types";
+import type { DataSource, DatasetInfo, GroupChoice, PrepareJob, PrepareReport, Slot } from "../types";
 import { Field, NumberInput, Section, Segmented } from "../ui";
 import { DataPicker } from "./DataPicker";
 
@@ -57,6 +58,23 @@ export function DataSection({ form, update, errors, onReady }: SectionProps & {
     train?.format && (decision ? train.format !== "decision" : !LM_FORMATS.includes(train.format))
       ? `This is ${train.format_label?.toLowerCase()} data, but you're training a ${decision ? "decision" : "language"} model.`
       : null;
+  // Columns that only say the answer again aren't offered: every row with one answer would land on the same side.
+  const columns: GroupChoice[] = (train?.groups ?? []).filter((g) => !g.answer);
+  const keptBy = d.keepTogether.startsWith("column:") ? d.keepTogether.slice("column:".length) : null;
+  const inputWord = decision ? "state" : "prompt";
+  const cutting = !(d.validation && d.test);
+  const balancing = decision && d.balance && cutting;
+  // The smaller share cut from train, and whether one value of the chosen column holds more rows than that on average.
+  const shares = [d.validation ? 0 : d.valPercent, d.test ? 0 : d.testPercent].filter((p) => p > 0);
+  const share = shares.length ? Math.min(...shares) : 0;
+  const kept = columns.find((c) => c.name === keptBy);
+  const coarse = kept && share > 0 && kept.values * share < 100;
+
+  // A column chosen for another dataset: back to the same input once this one turns out not to have it.
+  useEffect(() => {
+    if (train && keptBy && !(train.groups ?? []).some((g) => g.name === keptBy && !g.answer))
+      setData({ keepTogether: "input" });
+  }, [train, keptBy]); // not setData: it's a new function every render
 
   return (
     <Section title="Data" aside={<span className="hint">{decision ? "Columns: state, questions, gold" : "Columns: messages, prompt and completion, or text"}</span>}>
@@ -85,13 +103,6 @@ export function DataSection({ form, update, errors, onReady }: SectionProps & {
           <Segmented label="Duplicates" value={d.dedupe ? "remove" : "keep"}
             options={[{ value: "remove", label: "Remove" }, { value: "keep", label: "Keep" }]}
             onChange={(v) => setData({ dedupe: v === "remove" })} />
-          {d.dedupe && (
-            <select aria-label="What counts as a duplicate" className="auto" value={d.nearCopies ? "near" : "exact"}
-              onChange={(e) => setData({ nearCopies: e.target.value === "near" })}>
-              <option value="near">exact and near-copies</option>
-              <option value="exact">exact copies only</option>
-            </select>
-          )}
         </div>
         <div className="panel-row">
           <span className="panel-label">Split from train</span>
@@ -119,28 +130,45 @@ export function DataSection({ form, update, errors, onReady }: SectionProps & {
               </Field>
             )}
             <Field id="keepTogether" label="Keep together">
-              <select id="keepTogether" value={d.keepTogether}
-                onChange={(e) => setData({ keepTogether: e.target.value as FormState["data"]["keepTogether"] })}>
-                <option value="input">{decision ? "same state" : "same prompt"}</option>
-                <option value="source">same source</option>
+              <select id="keepTogether" value={d.keepTogether} onChange={(e) => setData({ keepTogether: e.target.value })}>
+                <option value="input">same {inputWord}</option>
+                {columns.map((c) => <option key={c.name} value={`column:${c.name}`}>same {c.name}</option>)}
+                {keptBy && !columns.some((c) => c.name === keptBy) && <option value={d.keepTogether}>same {keptBy}</option>}
                 <option value="nothing">nothing</option>
               </select>
             </Field>
+            {decision && cutting && (
+              <Field id="balance" label="Balance by">
+                <select id="balance" value={d.balance ? "answer" : "nothing"}
+                  onChange={(e) => setData({ balance: e.target.value === "answer" })}>
+                  <option value="answer">answer</option>
+                  <option value="nothing">nothing</option>
+                </select>
+              </Field>
+            )}
           </div>
         </div>
         <div className="panel-notes">
           <p>Only what you don't provide is cut from train. A validation or test file you give is used as it is.</p>
           {d.dedupe ? (
             <p>
-              {d.nearCopies ? "Exact and near-copies" : "Exact copies"} are removed, and validation or test rows that
-              share {decision ? "a state" : "a prompt"} with train are dropped.
+              Exact copies are removed, and validation or test rows with the same {inputWord} as a train row are
+              dropped.
             </p>
           ) : (
             <p className="warn-text">Duplicates are kept, so scores can look better than the model really is.</p>
           )}
-          {d.keepTogether === "nothing" && (
-            <p className="warn-text">Rows that share {decision ? "a state" : "a prompt"} can land on both sides of the split.</p>
+          {keptBy && (
+            <p>
+              Rows with the same {keptBy} stay on one side, so validation and test only hold {keptBy} values train never
+              saw.
+              {coarse && ` With ${kept.values} of them, one holds more than ${share}% of the rows, so validation and test come out bigger than asked.`}
+            </p>
           )}
+          {d.keepTogether === "nothing" && (
+            <p className="warn-text">Rows with the same {inputWord} can land on both sides of the split.</p>
+          )}
+          {balancing && <p>{balanceLine(train?.answers)}</p>}
         </div>
       </div>
 
@@ -309,7 +337,7 @@ function Summary({ report }: { report: PrepareReport }) {
   ];
   const removed = (slot: Slot) => {
     const r = report.removed[slot];
-    return r ? r.exact + r.near : 0;
+    return r ? r.exact + (r.near ?? 0) : 0;
   };
   const conflicts = Object.values(report.removed).reduce((n, r) => n + (r?.conflicts ?? 0), 0);
   const broken = Object.values(report.invalid).reduce((n: number, v) => n + (v ?? 0), 0);
@@ -360,7 +388,67 @@ function Summary({ report }: { report: PrepareReport }) {
           {report.notes.map((n) => <p key={n} className="hint">{n}</p>)}
         </div>
       )}
+      {report.answers && Object.keys(report.answers).length > 0 && (
+        <Answers answers={report.answers} />
+      )}
     </div>
+  );
+}
+
+// "true" and "false" are how a yes/no answer is stored.
+function said(answer: string) {
+  return answer === "true" ? "yes" : answer === "false" ? "no" : answer;
+}
+
+// Under the split settings: which answers balancing shares out, from the first rows of train.
+function balanceLine(answers: DatasetInfo["answers"]) {
+  const names = Object.keys(answers ?? {});
+  if (!answers || names.length === 0) return "Each answer gets its share of validation and test.";
+  const shown = names.slice(0, 3).map((q) => {
+    const options = Object.keys(answers[q]);
+    const listed = options.slice(0, 6).map(said).join(", ") + (options.length > 6 ? ", …" : "");
+    return names.length === 1 ? listed : `${q} (${listed})`;
+  });
+  const more = names.length > 3 ? ` and ${names.length - 3} more question${names.length === 4 ? "" : "s"}` : "";
+  return names.length === 1
+    ? `Each answer of ${names[0]} (${shown[0]}) gets its share of validation and test.`
+    : `Each answer gets its share of validation and test: ${shown.join(", ")}${more}.`;
+}
+
+// How many rows of each split have each answer, a question at a time. Open at once for one or two questions.
+function Answers({ answers }: { answers: NonNullable<PrepareReport["answers"]> }) {
+  const names = Object.keys(answers);
+  return (
+    <details className="answers" open={names.length <= 2}>
+      <summary>Answers in each split</summary>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Answer</th>
+              <th>Train</th>
+              <th>Validation</th>
+              <th>Test</th>
+            </tr>
+          </thead>
+          {names.map((q) => (
+            <tbody key={q}>
+              <tr className="answers-question">
+                <th colSpan={4}>{q}</th>
+              </tr>
+              {Object.entries(answers[q]).map(([answer, where]) => (
+                <tr key={answer}>
+                  <td>{said(answer)}</td>
+                  <td className={where.train ? undefined : "warn-text"}>{where.train.toLocaleString()}</td>
+                  <td className={where.validation ? undefined : "warn-text"}>{where.validation.toLocaleString()}</td>
+                  <td className={where.test ? undefined : "warn-text"}>{where.test.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          ))}
+        </table>
+      </div>
+    </details>
   );
 }
 

@@ -26,8 +26,8 @@ WRITER_NOTE = ("The writer: radiance's Gemma at temperature 1, so it doesn't wri
                "starts at a Model.")
 JUDGE_NOTE = ("The second opinion: Gemma at temperature 0, reading each message on its own, without knowing what it "
               "was asked to be. It's plugged into the Question's 2nd opinion handle with the dashed line.")
-DEDUPE_NOTE = ("Models repeat themselves. Exact copies and near-copies (sharing 70% of their three-word runs, the rule "
-               "Prepare data uses) are dropped, so no message is in the data twice.")
+DEDUPE_NOTE = ("Models repeat themselves. Exact copies and near-copies (sharing 70% of their three-word runs) are "
+               "dropped, so no message is in the data twice.")
 
 TEAMS = {  # option name: what it covers, the way the writer is told and the Question's option means it
     "cards": "lost, stolen or blocked cards, card limits and PINs",
