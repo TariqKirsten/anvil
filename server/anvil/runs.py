@@ -284,8 +284,10 @@ def command(module: str, path: Path, cards: int, args: list[str]) -> list[str]:
     """One process, or with several cards one per card through torchrun (which also stops them all if one fails)."""
     if cards == 1:
         return [sys.executable, "-m", module, str(path)] + args
-    return [sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc-per-node={cards}",
-            "-m", module, str(path)] + args
+    # --local-addr: torchrun otherwise reaches its own workers at the machine's hostname, and on a tailnet
+    # "mars" can resolve (through MagicDNS) to another device, so the workers never connect.
+    return [sys.executable, "-m", "torch.distributed.run", "--standalone", "--local-addr=127.0.0.1",
+            f"--nproc-per-node={cards}", "-m", module, str(path)] + args
 
 
 def _start(module: str, key: str, path: Path, cards: list[int], token: str | None, log_path: Path,
